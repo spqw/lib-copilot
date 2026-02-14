@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/index.ts",
-    "test": "ts-node src/__tests__/example.ts",
+    "test": "ts-node src/__tests__/demo.ts",
     "cli": "ts-node src/cli.ts",
     "example:chat": "ts-node examples/chat-example.ts",
     "example:completion": "ts-node examples/completion-example.ts"

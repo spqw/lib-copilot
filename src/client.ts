@@ -40,8 +40,9 @@ export class CopilotClient {
     this.client = axios.create({
       baseURL: this.endpoint,
       timeout: options.timeout || 30000,
-      headers: this.getHeaders(),
     });
+    
+    this.client.defaults.headers.common = this.getHeaders() as any;
 
     if (this.debug) {
       console.log('[Copilot Client] Initialized', {
@@ -55,7 +56,7 @@ export class CopilotClient {
   /**
    * Get standard headers that mimic VSCode extension
    */
-  private getHeaders() {
+  private getHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
       'User-Agent': this.extensionInfo.userAgent,
       'Accept': 'application/json',
@@ -76,7 +77,7 @@ export class CopilotClient {
   public setToken(token: string, expiresAt?: number): void {
     this.token = token;
     this.tokenExpiresAt = expiresAt || Date.now() + 8 * 3600 * 1000; // 8 hours default
-    this.client.defaults.headers = this.getHeaders();
+    this.client.defaults.headers.common = this.getHeaders() as any;
 
     if (this.debug) {
       console.log('[Copilot Client] Token set, expires at:', new Date(this.tokenExpiresAt));
