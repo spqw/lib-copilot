@@ -4,6 +4,12 @@
   "description": "Direct Copilot API client - mimic VSCode extension behavior for CLI/programmatic access",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "vcopilot": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/index.ts",
@@ -11,6 +17,7 @@
     "demo": "ts-node src/__tests__/mock-chat.ts",
     "live-chat": "ts-node src/__tests__/live-chat.ts",
     "cli": "ts-node src/cli.ts",
+    "prepublishOnly": "npm run build",
     "example:chat": "ts-node examples/chat-example.ts",
     "example:completion": "ts-node examples/completion-example.ts"
   },
