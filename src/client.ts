@@ -20,7 +20,8 @@ import {
  */
 export class CopilotClient {
   private client: AxiosInstance;
-  private token: string | null = null;
+  private githubToken: string | null = null; // The GitHub PAT
+  private token: string | null = null;       // The Copilot session token
   private tokenExpiresAt: number = 0;
   private endpoint: string;
   private model: string;
@@ -32,24 +33,66 @@ export class CopilotClient {
   };
 
   constructor(options: CopilotOptions = {}) {
-    this.endpoint = options.endpoint || 'https://api.github.com/copilot_internal';
+    this.endpoint = options.endpoint || 'https://api.githubcopilot.com';
     this.model = options.model || 'gpt-4';
     this.debug = options.debug || false;
-    this.token = options.token || null;
+    this.githubToken = options.token || null;
 
     this.client = axios.create({
       baseURL: this.endpoint,
       timeout: options.timeout || 30000,
     });
-    
+
     this.client.defaults.headers.common = this.getHeaders() as any;
 
     if (this.debug) {
       console.log('[Copilot Client] Initialized', {
         endpoint: this.endpoint,
         model: this.model,
-        authenticated: !!this.token,
+        authenticated: !!this.githubToken,
       });
+    }
+  }
+
+  /**
+   * Exchange GitHub PAT for a short-lived Copilot session token
+   */
+  private async ensureAuthenticated(): Promise<void> {
+    // If we already have a valid copilot token, skip
+    if (this.token && Date.now() < this.tokenExpiresAt - 5 * 60 * 1000) {
+      return;
+    }
+
+    if (!this.githubToken) {
+      throw new Error('Not authenticated. Please set a token first.');
+    }
+
+    try {
+      if (this.debug) console.log('[Copilot Client] Exchanging GitHub token for Copilot session token...');
+
+      const response = await axios.get('https://api.github.com/copilot_internal/v2/token', {
+        headers: {
+          'Authorization': `token ${this.githubToken}`,
+          'User-Agent': 'GithubCopilot/1.200.0',
+          'Accept': 'application/json',
+          'Editor-Version': 'vscode/1.95.0',
+          'Editor-Plugin-Version': 'copilot/1.200.0',
+        },
+      });
+
+      this.token = response.data.token;
+      this.tokenExpiresAt = response.data.expires_at
+        ? new Date(response.data.expires_at * 1000).getTime()
+        : Date.now() + 30 * 60 * 1000; // 30 min fallback
+
+      // Update client headers with the copilot token
+      this.client.defaults.headers.common = this.getHeaders() as any;
+
+      if (this.debug) {
+        console.log('[Copilot Client] Session token obtained, expires:', new Date(this.tokenExpiresAt).toISOString());
+      }
+    } catch (error) {
+      throw new Error(`Failed to get Copilot session token: ${this.formatError(error)}`);
     }
   }
 
@@ -58,10 +101,14 @@ export class CopilotClient {
    */
   private getHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
-      'User-Agent': this.extensionInfo.userAgent,
+      'User-Agent': 'GithubCopilot/1.200.0',
       'Accept': 'application/json',
       'Content-Type': 'application/json',
-      'X-GitHub-Api-Version': '2022-11-28',
+      'Editor-Version': 'vscode/1.95.0',
+      'Editor-Plugin-Version': 'copilot/1.200.0',
+      'Copilot-Integration-Id': 'vscode-chat',
+      'Openai-Organization': 'github-copilot',
+      'Openai-Intent': 'conversation-panel',
     };
 
     if (this.token) {
@@ -106,16 +153,14 @@ export class CopilotClient {
    * Check if authenticated
    */
   public isAuthenticated(): boolean {
-    return !!this.getToken();
+    return !!(this.githubToken || this.getToken());
   }
 
   /**
    * Chat completion (conversational)
    */
   public async chat(request: ChatRequest): Promise<ChatResponse> {
-    if (!this.isAuthenticated()) {
-      throw new Error('Not authenticated. Please set a token first.');
-    }
+    await this.ensureAuthenticated();
 
     try {
       const payload = {
@@ -154,9 +199,7 @@ export class CopilotClient {
     onChunk: (content: string) => void,
     onError?: (error: Error) => void
   ): Promise<void> {
-    if (!this.isAuthenticated()) {
-      throw new Error('Not authenticated. Please set a token first.');
-    }
+    await this.ensureAuthenticated();
 
     try {
       const payload = {
@@ -222,9 +265,7 @@ export class CopilotClient {
    * Code completion
    */
   public async complete(request: CompletionRequest): Promise<CompletionResponse> {
-    if (!this.isAuthenticated()) {
-      throw new Error('Not authenticated. Please set a token first.');
-    }
+    await this.ensureAuthenticated();
 
     try {
       const payload = {
@@ -264,9 +305,7 @@ export class CopilotClient {
    * Code-aware completion (with language context)
    */
   public async completeCode(request: CodeCompletionRequest): Promise<CodeCompletionResponse> {
-    if (!this.isAuthenticated()) {
-      throw new Error('Not authenticated. Please set a token first.');
-    }
+    await this.ensureAuthenticated();
 
     try {
       const prompt = request.prefix;
@@ -307,16 +346,28 @@ export class CopilotClient {
   }
 
   /**
-   * Get available models
+   * Get available models (IDs only)
    */
   public async getModels(): Promise<string[]> {
-    if (!this.isAuthenticated()) {
-      throw new Error('Not authenticated. Please set a token first.');
-    }
+    await this.ensureAuthenticated();
 
     try {
       const response = await this.client.get('/models');
       return response.data.data.map((m: any) => m.id);
+    } catch (error) {
+      throw new Error(`Failed to get models: ${this.formatError(error)}`);
+    }
+  }
+
+  /**
+   * Get available models with full metadata
+   */
+  public async getModelsDetailed(): Promise<any[]> {
+    await this.ensureAuthenticated();
+
+    try {
+      const response = await this.client.get('/models');
+      return response.data.data;
     } catch (error) {
       throw new Error(`Failed to get models: ${this.formatError(error)}`);
     }
@@ -330,9 +381,7 @@ export class CopilotClient {
     completionTokens: number;
     totalTokens: number;
   }> {
-    if (!this.isAuthenticated()) {
-      throw new Error('Not authenticated. Please set a token first.');
-    }
+    await this.ensureAuthenticated();
 
     try {
       const response = await this.client.get('/usage');
@@ -441,7 +490,10 @@ export class CopilotClient {
    */
   private formatError(error: any): string {
     if (axios.isAxiosError(error)) {
-      return error.response?.data?.message || error.message;
+      if (this.debug && error.response?.data) {
+        console.log('[Copilot] Error response:', JSON.stringify(error.response.data, null, 2));
+      }
+      return error.response?.data?.message || error.response?.data?.error || error.message;
     }
     return error?.message || String(error);
   }
