@@ -183,8 +183,8 @@ export class CopilotAuth {
       const response = await this.client.post(
         'https://github.com/login/device/code',
         {
-          client_id: 'Ov23liZeYeZfqT9n0A0k', // GitHub Copilot CLI app
-          scope: 'read:user repo',
+          client_id: 'Iv1.b507a08c87ecfe98', // VSCode GitHub Copilot OAuth app
+          scope: 'read:user',
         },
         {
           headers: {
@@ -218,7 +218,7 @@ export class CopilotAuth {
         const response = await this.client.post(
           'https://github.com/login/oauth/access_token',
           {
-            client_id: 'Ov23liZeYeZfqT9n0A0k',
+            client_id: 'Iv1.b507a08c87ecfe98',
             device_code: deviceCode,
             grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
           },
