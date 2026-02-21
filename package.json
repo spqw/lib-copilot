@@ -1,6 +1,6 @@
 {
   "name": "lib-copilot",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Direct Copilot API client - mimic VSCode extension behavior for CLI/programmatic access",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
