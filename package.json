@@ -17,6 +17,7 @@
     "demo": "ts-node src/__tests__/mock-chat.ts",
     "live-chat": "ts-node src/__tests__/live-chat.ts",
     "cli": "ts-node src/cli.ts",
+    "release": "./scripts/release.sh",
     "prepublishOnly": "npm run build",
     "example:chat": "ts-node examples/chat-example.ts",
     "example:completion": "ts-node examples/completion-example.ts"

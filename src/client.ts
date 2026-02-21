@@ -26,6 +26,8 @@ export class CopilotClient {
   private endpoint: string;
   private model: string;
   private debug: boolean;
+  private local: boolean;
+  private auth: any; // CopilotAuth instance for session disk caching
 
   private extensionInfo: VSCodeExtensionInfo = {
     version: '1.200.0', // Copilot version
@@ -33,10 +35,22 @@ export class CopilotClient {
   };
 
   constructor(options: CopilotOptions = {}) {
-    this.endpoint = options.endpoint || 'https://api.githubcopilot.com';
-    this.model = options.model || 'gpt-4';
+    this.local = options.local || false;
+    this.endpoint = options.endpoint || (this.local ? 'http://localhost:1234/v1' : 'https://api.githubcopilot.com');
+    this.model = options.model || (this.local ? 'default' : 'gpt-4');
     this.debug = options.debug || false;
     this.githubToken = options.token || null;
+    this.auth = options.auth || null;
+
+    // Try to restore Copilot session token from disk cache
+    if (!this.local && this.auth) {
+      const cached = this.auth.getCachedSession();
+      if (cached) {
+        this.token = cached.token;
+        this.tokenExpiresAt = cached.expiresAt;
+        if (this.debug) console.log('[Copilot Client] Restored session token from disk cache, expires:', new Date(this.tokenExpiresAt).toISOString());
+      }
+    }
 
     this.client = axios.create({
       baseURL: this.endpoint,
@@ -46,19 +60,25 @@ export class CopilotClient {
     this.client.defaults.headers.common = this.getHeaders() as any;
 
     if (this.debug) {
-      console.log('[Copilot Client] Initialized', {
+      console.log(`[${this.local ? 'Local' : 'Copilot'} Client] Initialized`, {
         endpoint: this.endpoint,
         model: this.model,
-        authenticated: !!this.githubToken,
+        local: this.local,
+        authenticated: this.local || !!this.githubToken,
       });
     }
   }
 
   /**
-   * Exchange GitHub PAT for a short-lived Copilot session token
+   * Exchange GitHub PAT for a short-lived Copilot session token.
+   * Uses disk-cached session token when available (like Goose/VSCode).
+   * Refreshes with retry when expired.
    */
   private async ensureAuthenticated(): Promise<void> {
-    // If we already have a valid copilot token, skip
+    // Local mode: no auth needed
+    if (this.local) return;
+
+    // If we already have a valid copilot token (5-min buffer), skip
     if (this.token && Date.now() < this.tokenExpiresAt - 5 * 60 * 1000) {
       return;
     }
@@ -67,32 +87,60 @@ export class CopilotClient {
       throw new Error('Not authenticated. Please set a token first.');
     }
 
-    try {
-      if (this.debug) console.log('[Copilot Client] Exchanging GitHub token for Copilot session token...');
+    // Retry up to 3 times (like Goose)
+    const maxAttempts = 3;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        if (this.debug) console.log(`[Copilot Client] Exchanging GitHub token for Copilot session token (attempt ${attempt + 1})...`);
 
-      const response = await axios.get('https://api.github.com/copilot_internal/v2/token', {
-        headers: {
-          'Authorization': `token ${this.githubToken}`,
-          'User-Agent': 'GithubCopilot/1.200.0',
-          'Accept': 'application/json',
-          'Editor-Version': 'vscode/1.95.0',
-          'Editor-Plugin-Version': 'copilot/1.200.0',
-        },
-      });
+        const response = await axios.get('https://api.github.com/copilot_internal/v2/token', {
+          headers: {
+            'Authorization': `token ${this.githubToken}`,
+            'User-Agent': 'GithubCopilot/1.200.0',
+            'Accept': 'application/json',
+            'Editor-Version': 'vscode/1.95.0',
+            'Editor-Plugin-Version': 'copilot/1.200.0',
+          },
+        });
 
-      this.token = response.data.token;
-      this.tokenExpiresAt = response.data.expires_at
-        ? new Date(response.data.expires_at * 1000).getTime()
-        : Date.now() + 30 * 60 * 1000; // 30 min fallback
+        this.token = response.data.token;
+        // Use refresh_in if available (like Goose), fall back to expires_at, then 30 min
+        if (response.data.refresh_in) {
+          this.tokenExpiresAt = Date.now() + response.data.refresh_in * 1000;
+        } else if (response.data.expires_at) {
+          this.tokenExpiresAt = response.data.expires_at * 1000;
+        } else {
+          this.tokenExpiresAt = Date.now() + 30 * 60 * 1000;
+        }
 
-      // Update client headers with the copilot token
-      this.client.defaults.headers.common = this.getHeaders() as any;
+        // Update client headers with the copilot token
+        this.client.defaults.headers.common = this.getHeaders() as any;
 
-      if (this.debug) {
-        console.log('[Copilot Client] Session token obtained, expires:', new Date(this.tokenExpiresAt).toISOString());
+        // Persist session token to disk so subsequent invocations reuse it
+        if (this.auth) {
+          this.auth.saveSession(this.token, this.tokenExpiresAt);
+        }
+
+        if (this.debug) {
+          console.log('[Copilot Client] Session token obtained, expires:', new Date(this.tokenExpiresAt).toISOString());
+        }
+        return;
+      } catch (error: any) {
+        const status = error?.response?.status;
+        if (status === 404) {
+          throw new Error(
+            'Copilot session token exchange failed (404). This usually means:\n' +
+            '  - Your GitHub account does not have an active Copilot subscription\n' +
+            '  - Your token does not have Copilot access\n' +
+            'Check your subscription at https://github.com/settings/copilot'
+          );
+        }
+        if (attempt < maxAttempts - 1) {
+          if (this.debug) console.log(`[Copilot Client] Token exchange failed, retrying... (${this.formatError(error)})`);
+          continue;
+        }
+        throw new Error(`Failed to get Copilot session token: ${this.formatError(error)}`);
       }
-    } catch (error) {
-      throw new Error(`Failed to get Copilot session token: ${this.formatError(error)}`);
     }
   }
 
@@ -100,6 +148,13 @@ export class CopilotClient {
    * Get standard headers that mimic VSCode extension
    */
   private getHeaders(): Record<string, string> {
+    if (this.local) {
+      return {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      };
+    }
+
     const headers: Record<string, string> = {
       'User-Agent': 'GithubCopilot/1.200.0',
       'Accept': 'application/json',
@@ -353,7 +408,8 @@ export class CopilotClient {
 
     try {
       const response = await this.client.get('/models');
-      return response.data.data.map((m: any) => m.id);
+      const models = response.data.data || response.data;
+      return (Array.isArray(models) ? models : []).map((m: any) => m.id);
     } catch (error) {
       throw new Error(`Failed to get models: ${this.formatError(error)}`);
     }
@@ -367,7 +423,8 @@ export class CopilotClient {
 
     try {
       const response = await this.client.get('/models');
-      return response.data.data;
+      const models = response.data.data || response.data;
+      return Array.isArray(models) ? models : [];
     } catch (error) {
       throw new Error(`Failed to get models: ${this.formatError(error)}`);
     }

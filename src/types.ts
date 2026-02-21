@@ -98,6 +98,10 @@ export interface CopilotOptions {
   model?: string;
   timeout?: number;
   debug?: boolean;
+  /** Skip Copilot auth and use a local OpenAI-compatible server (e.g. LM Studio) */
+  local?: boolean;
+  /** Auth instance for session token disk caching */
+  auth?: any;
 }
 
 export interface VSCodeExtensionInfo {

@@ -30,11 +30,14 @@ export interface DeviceFlowResponse {
 export class CopilotAuth {
   private client: AxiosInstance;
   private tokenPath: string;
+  private sessionPath: string;
   private debug: boolean;
 
   constructor(debug: boolean = false) {
     this.debug = debug;
-    this.tokenPath = path.join(os.homedir(), '.copilot', 'token.json');
+    const configDir = path.join(os.homedir(), '.copilot');
+    this.tokenPath = path.join(configDir, 'token.json');
+    this.sessionPath = path.join(configDir, 'session.json');
 
     this.client = axios.create({
       timeout: 10000,
@@ -66,22 +69,15 @@ export class CopilotAuth {
   }
 
   /**
-   * Get cached token from disk
+   * Get cached GitHub OAuth token from disk.
+   * OAuth tokens from device flow don't expire — they persist until revoked.
    */
   private getCachedToken(): string | null {
     try {
       if (fs.existsSync(this.tokenPath)) {
         const data = fs.readFileSync(this.tokenPath, 'utf-8');
         const parsed = JSON.parse(data);
-
-        // Check if expired
-        if (parsed.expiresAt && Date.now() > parsed.expiresAt) {
-          if (this.debug) console.log('[Auth] Cached token expired');
-          fs.unlinkSync(this.tokenPath);
-          return null;
-        }
-
-        return parsed.token;
+        return parsed.token || null;
       }
     } catch (e) {
       if (this.debug) console.log('[Auth] Failed to read cached token:', e);
@@ -90,9 +86,9 @@ export class CopilotAuth {
   }
 
   /**
-   * Save token to cache
+   * Save GitHub OAuth token to disk (no expiry — device flow tokens don't expire).
    */
-  private saveToken(token: string, expiresAt?: number): void {
+  private saveToken(token: string): void {
     try {
       const dir = path.dirname(this.tokenPath);
       if (!fs.existsSync(dir)) {
@@ -101,7 +97,6 @@ export class CopilotAuth {
 
       const data = {
         token,
-        expiresAt: expiresAt || Date.now() + 8 * 3600 * 1000, // 8 hours default
         timestamp: new Date().toISOString(),
       };
 
@@ -109,6 +104,48 @@ export class CopilotAuth {
       if (this.debug) console.log('[Auth] Token saved to cache');
     } catch (e) {
       console.error('[Auth] Failed to save token:', e);
+    }
+  }
+
+  /**
+   * Get cached Copilot session token from disk.
+   * Returns null if expired or not found.
+   */
+  public getCachedSession(): { token: string; expiresAt: number; endpoint?: string } | null {
+    try {
+      if (fs.existsSync(this.sessionPath)) {
+        const data = fs.readFileSync(this.sessionPath, 'utf-8');
+        const parsed = JSON.parse(data);
+
+        // Check if expired (with 5-minute buffer)
+        if (parsed.expiresAt && Date.now() > parsed.expiresAt - 5 * 60 * 1000) {
+          if (this.debug) console.log('[Auth] Cached session token expired');
+          return null;
+        }
+
+        return parsed;
+      }
+    } catch (e) {
+      if (this.debug) console.log('[Auth] Failed to read cached session:', e);
+    }
+    return null;
+  }
+
+  /**
+   * Save Copilot session token to disk.
+   */
+  public saveSession(token: string, expiresAt: number, endpoint?: string): void {
+    try {
+      const dir = path.dirname(this.sessionPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+
+      const data = { token, expiresAt, endpoint, timestamp: new Date().toISOString() };
+      fs.writeFileSync(this.sessionPath, JSON.stringify(data, null, 2));
+      if (this.debug) console.log('[Auth] Session token saved to cache');
+    } catch (e) {
+      if (this.debug) console.error('[Auth] Failed to save session:', e);
     }
   }
 
@@ -248,7 +285,6 @@ export class CopilotAuth {
           return {
             token: data.access_token,
             type: 'github',
-            expiresAt: Date.now() + (data.expires_in || 8 * 3600) * 1000,
           };
         }
       } catch (error) {
@@ -273,6 +309,10 @@ export class CopilotAuth {
       if (fs.existsSync(this.tokenPath)) {
         fs.unlinkSync(this.tokenPath);
         if (this.debug) console.log('[Auth] Token cache cleared');
+      }
+      if (fs.existsSync(this.sessionPath)) {
+        fs.unlinkSync(this.sessionPath);
+        if (this.debug) console.log('[Auth] Session cache cleared');
       }
     } catch (e) {
       console.error('[Auth] Failed to clear cache:', e);

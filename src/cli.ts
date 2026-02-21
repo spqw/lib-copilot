@@ -39,19 +39,27 @@ const MULTIPLIERS: Record<string, number> = {
 function parseArgs(argv: string[]): {
   model: string;
   system?: string;
+  token?: string;
   debug: boolean;
   login: boolean;
+  status: boolean;
   models: boolean;
   usage: boolean;
+  local: boolean;
+  endpoint?: string;
   positional: string[];
 } {
   const result = {
     model: DEFAULT_MODEL,
     system: undefined as string | undefined,
+    token: undefined as string | undefined,
     debug: false,
     login: false,
+    status: false,
     models: false,
     usage: false,
+    local: false,
+    endpoint: undefined as string | undefined,
     positional: [] as string[],
   };
 
@@ -62,14 +70,22 @@ function parseArgs(argv: string[]): {
       result.model = argv[++i];
     } else if (arg === '--system' && i + 1 < argv.length) {
       result.system = argv[++i];
+    } else if (arg === '--endpoint' && i + 1 < argv.length) {
+      result.endpoint = argv[++i];
+    } else if (arg === '--token' && i + 1 < argv.length) {
+      result.token = argv[++i];
     } else if (arg === '--debug') {
       result.debug = true;
     } else if (arg === '--login') {
       result.login = true;
+    } else if (arg === '--status') {
+      result.status = true;
     } else if (arg === '--models') {
       result.models = true;
     } else if (arg === '--usage') {
       result.usage = true;
+    } else if (arg === '--local') {
+      result.local = true;
     } else if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
@@ -90,21 +106,54 @@ Usage:
   vcopilot [options] "your prompt here"       Positional prompt
   vcopilot --models                           List available models
   vcopilot --usage                            Show premium quota
+  vcopilot --status                           Show token/auth state
   vcopilot --login                            Force re-authentication
+  vcopilot --login --token <pat>              Save a GitHub PAT
 
 Options:
-  --model <name>    Model to use (default: ${DEFAULT_MODEL})
-  --system <text>   System prompt
-  --debug           Enable debug logging
-  --login           Force device flow re-auth
-  --models          List available models
-  --usage           Show premium quota remaining
-  -h, --help        Show this help
+  --model <name>      Model to use (default: ${DEFAULT_MODEL})
+  --system <text>     System prompt
+  --token <pat>       GitHub Personal Access Token (skips device flow)
+  --local             Use local LM Studio server (localhost:1234)
+  --endpoint <url>    Custom API base URL (e.g. http://localhost:1234/v1)
+  --debug             Enable debug logging
+  --login             Force re-auth (device flow, or save --token)
+  --status            Show token and session state
+  --models            List available models
+  --usage             Show premium quota remaining
+  -h, --help          Show this help
+
+Authentication (in priority order):
+  1. --token <pat>              CLI flag (highest priority)
+  2. GITHUB_TOKEN env var       Environment variable
+  3. ~/.copilot/token.json      Cached from previous login
+  4. Device flow (interactive)  Browser-based OAuth (fallback)
+
+  To use a PAT permanently, save it with:
+    vcopilot --login --token ghp_YourTokenHere
+
+  Or export it:
+    export GITHUB_TOKEN=ghp_YourTokenHere
 
 Examples:
   echo "what is 2+2" | vcopilot
   cat PROMPT.md | vcopilot --model grok-code-fast-1 > output.md
   vcopilot "explain quicksort"
+  vcopilot --token ghp_abc123 "hello"
+
+Local models (LM Studio):
+  1. Install LM Studio from https://lmstudio.ai
+  2. Download a model (e.g. openai/gpt-oss-20b MLX)
+  3. Start the local server (Developer tab → Start Server)
+  4. Use with vcopilot:
+
+  vcopilot --local "what is 2+2"
+  vcopilot --local --model openai/gpt-oss-20b "explain quicksort"
+  vcopilot --local --models
+  echo "refactor this" | vcopilot --local --system "You are a code expert"
+
+  Custom endpoint:
+  vcopilot --endpoint http://192.168.1.10:1234/v1 "hello"
 `);
 }
 
@@ -118,12 +167,11 @@ function readStdin(): Promise<string> {
   });
 }
 
-async function authenticate(auth: CopilotAuth, debug: boolean): Promise<string> {
-  // 1. Try cached token
-  const cached = auth['getCachedToken']();
-  if (cached) {
-    if (debug) process.stderr.write('[auth] using cached token\n');
-    return cached;
+async function authenticate(auth: CopilotAuth, debug: boolean, cliToken?: string): Promise<string> {
+  // 1. --token flag (highest priority)
+  if (cliToken) {
+    if (debug) process.stderr.write('[auth] using --token flag\n');
+    return cliToken;
   }
 
   // 2. Try env vars
@@ -133,7 +181,14 @@ async function authenticate(auth: CopilotAuth, debug: boolean): Promise<string> 
     return envToken;
   }
 
-  // 3. Auto device flow
+  // 3. Try cached token
+  const cached = auth['getCachedToken']();
+  if (cached) {
+    if (debug) process.stderr.write('[auth] using cached token\n');
+    return cached;
+  }
+
+  // 4. Auto device flow (last resort)
   process.stderr.write('No token found. Starting device flow authentication...\n');
   const flow = await auth.initiateDeviceFlow();
   process.stderr.write(`\nOpen: ${flow.verification_uri}\nEnter code: ${flow.user_code}\n\nWaiting for authorization...\n`);
@@ -146,22 +201,93 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const auth = new CopilotAuth(args.debug);
 
-  // --login: force re-auth
+  // --login: force re-auth (with PAT or device flow)
   if (args.login) {
     auth.clearCache();
-    process.stderr.write('Cleared cached token. Starting device flow...\n');
-    const flow = await auth.initiateDeviceFlow();
-    process.stderr.write(`\nOpen: ${flow.verification_uri}\nEnter code: ${flow.user_code}\n\nWaiting for authorization...\n`);
-    const result = await auth.pollDeviceFlow(flow.device_code);
-    process.stderr.write(`Authenticated successfully. Token saved.\n`);
+    if (args.token) {
+      // Validate and save the PAT
+      process.stderr.write('Validating GitHub token...\n');
+      const result = await auth.authenticateWithGitHub(args.token);
+      process.stderr.write(`Authenticated as GitHub user. Token saved to ~/.copilot/token.json\n`);
+      if (result.scopes?.length) {
+        process.stderr.write(`Scopes: ${result.scopes.join(', ')}\n`);
+      }
+    } else {
+      process.stderr.write('Cleared cached token. Starting device flow...\n');
+      const flow = await auth.initiateDeviceFlow();
+      process.stderr.write(`\nOpen: ${flow.verification_uri}\nEnter code: ${flow.user_code}\n\nWaiting for authorization...\n`);
+      await auth.pollDeviceFlow(flow.device_code);
+      process.stderr.write(`Authenticated successfully. Token saved.\n`);
+    }
     return;
   }
 
-  const token = await authenticate(auth, args.debug);
-  const client = new CopilotClient({ token, model: args.model, debug: args.debug });
+  // --status: show token state
+  if (args.status) {
+    const envToken = process.env.GITHUB_TOKEN || process.env.COPILOT_TOKEN;
+    const envName = process.env.GITHUB_TOKEN ? 'GITHUB_TOKEN' : process.env.COPILOT_TOKEN ? 'COPILOT_TOKEN' : null;
+    const cached = auth['getCachedToken']();
+    const session = auth.getCachedSession();
+
+    process.stdout.write('github token:\n');
+    if (envToken) {
+      process.stdout.write(`  source:  ${envName} env var\n`);
+      process.stdout.write(`  value:   ${envToken.slice(0, 8)}...${envToken.slice(-4)}\n`);
+    } else if (cached) {
+      process.stdout.write(`  source:  ~/.copilot/token.json\n`);
+      process.stdout.write(`  value:   ${cached.slice(0, 8)}...${cached.slice(-4)}\n`);
+    } else {
+      process.stdout.write('  (none) — run vcopilot --login to authenticate\n');
+    }
+
+    process.stdout.write('\ncopilot session:\n');
+    if (session) {
+      const remaining = session.expiresAt - Date.now();
+      const mins = Math.floor(remaining / 60000);
+      const expired = remaining <= 0;
+      process.stdout.write(`  source:  ~/.copilot/session.json\n`);
+      process.stdout.write(`  value:   ${session.token.slice(0, 8)}...${session.token.slice(-4)}\n`);
+      process.stdout.write(`  expires: ${new Date(session.expiresAt).toISOString()}`);
+      if (expired) {
+        process.stdout.write(' (expired)\n');
+      } else {
+        process.stdout.write(` (${mins}m remaining)\n`);
+      }
+    } else {
+      process.stdout.write('  (none) — will be obtained on next request\n');
+    }
+
+    return;
+  }
+
+  // Determine if using local mode (--local or --endpoint implies local)
+  const isLocal = args.local || !!args.endpoint;
+
+  let token: string | undefined;
+  let client: CopilotClient;
+  if (isLocal) {
+    client = new CopilotClient({
+      local: true,
+      endpoint: args.endpoint,
+      model: args.model === DEFAULT_MODEL ? undefined : args.model,
+      debug: args.debug,
+    });
+  } else {
+    token = await authenticate(auth, args.debug, args.token);
+    client = new CopilotClient({ token, model: args.model, debug: args.debug, auth });
+  }
 
   // --models: list models with multipliers and context window, sorted by premium cost
   if (args.models) {
+    if (isLocal) {
+      // Local server: just list model IDs
+      const models = await client.getModelsDetailed();
+      for (const m of models) {
+        process.stdout.write(`${m.id}\n`);
+      }
+      return;
+    }
+
     const models = await client.getModelsDetailed();
 
     // Build display rows
@@ -192,6 +318,10 @@ async function main(): Promise<void> {
 
   // --usage: show premium quota
   if (args.usage) {
+    if (isLocal) {
+      process.stderr.write('--usage is not available for local models\n');
+      return;
+    }
     const res = await axios.get('https://api.github.com/copilot_internal/user', {
       headers: {
         'Authorization': `token ${token}`,
@@ -256,10 +386,12 @@ async function main(): Promise<void> {
   }
 
   // Stream response: content to stdout, status to stderr
-  process.stderr.write(`model: ${args.model}\n`);
+  const modelLabel = args.model === DEFAULT_MODEL && isLocal ? 'default' : args.model;
+  process.stderr.write(`${isLocal ? '[local] ' : ''}model: ${modelLabel}\n`);
 
+  const requestModel = (args.model === DEFAULT_MODEL && isLocal) ? undefined : args.model;
   await client.chatStream(
-    { messages, model: args.model },
+    { messages, model: requestModel },
     (chunk) => {
       process.stdout.write(chunk);
     },
