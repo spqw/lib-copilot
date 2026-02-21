@@ -3,6 +3,7 @@
 import { CopilotClient } from './client';
 import { CopilotAuth } from './auth';
 import axios from 'axios';
+import { execSync } from 'child_process';
 
 const DEFAULT_MODEL = 'gpt-4.1';
 
@@ -46,6 +47,8 @@ function parseArgs(argv: string[]): {
   models: boolean;
   usage: boolean;
   local: boolean;
+  version: boolean;
+  update: boolean;
   endpoint?: string;
   positional: string[];
 } {
@@ -59,6 +62,8 @@ function parseArgs(argv: string[]): {
     models: false,
     usage: false,
     local: false,
+    version: false,
+    update: false,
     endpoint: undefined as string | undefined,
     positional: [] as string[],
   };
@@ -86,6 +91,10 @@ function parseArgs(argv: string[]): {
       result.usage = true;
     } else if (arg === '--local') {
       result.local = true;
+    } else if (arg === '--version' || arg === '-v') {
+      result.version = true;
+    } else if (arg === '--update') {
+      result.update = true;
     } else if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
@@ -121,6 +130,8 @@ Options:
   --status            Show token and session state
   --models            List available models
   --usage             Show premium quota remaining
+  -v, --version       Show version
+  --update            Update to latest version
   -h, --help          Show this help
 
 Authentication (in priority order):
@@ -199,6 +210,53 @@ async function authenticate(auth: CopilotAuth, debug: boolean, cliToken?: string
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+  const pkgVersion: string = require('../package.json').version;
+
+  // --version: print version and exit
+  if (args.version) {
+    process.stdout.write(`vcopilot ${pkgVersion}\n`);
+    return;
+  }
+
+  // --update: check for updates and self-update
+  if (args.update) {
+    process.stderr.write('Checking for updates...\n');
+    try {
+      const res = await axios.get('https://api.github.com/repos/spqw/lib-copilot/releases/latest', {
+        headers: { 'Accept': 'application/vnd.github+json' },
+      });
+      const latest = (res.data.tag_name as string).replace(/^v/, '');
+
+      if (latest === pkgVersion) {
+        process.stdout.write(`vcopilot is up to date (v${pkgVersion})\n`);
+        return;
+      }
+
+      process.stderr.write(`Update available: v${pkgVersion} → v${latest}\n`);
+
+      // Detect install method
+      let isHomebrew = false;
+      try {
+        execSync('brew list spqw/homebrew-tap/vcopilot 2>/dev/null', { stdio: 'ignore' });
+        isHomebrew = true;
+      } catch {}
+
+      if (isHomebrew) {
+        process.stderr.write('Updating via Homebrew...\n');
+        execSync('brew upgrade spqw/homebrew-tap/vcopilot', { stdio: 'inherit' });
+      } else {
+        process.stderr.write('Updating via npm...\n');
+        execSync('npm update -g lib-copilot', { stdio: 'inherit' });
+      }
+
+      process.stdout.write(`Updated vcopilot from v${pkgVersion} to v${latest}\n`);
+    } catch (err: any) {
+      process.stderr.write(`Update failed: ${err.message}\n`);
+      process.exit(1);
+    }
+    return;
+  }
+
   const auth = new CopilotAuth(args.debug);
 
   // --login: force re-auth (with PAT or device flow)
