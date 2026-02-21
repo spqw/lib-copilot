@@ -48,6 +48,21 @@ gh release create "$TAG" "$TARBALL" \
   --title "$TAG" \
   --generate-notes
 
+# Update Homebrew formula
+SHA256=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
+URL="https://github.com/spqw/lib-copilot/releases/download/${TAG}/${TARBALL}"
+
+TAP_DIR=$(mktemp -d)
+git clone git@github.com:spqw/homebrew-tap.git "$TAP_DIR"
+
+sed -i '' "s|url \".*\"|url \"${URL}\"|" "$TAP_DIR/Formula/vcopilot.rb"
+sed -i '' "s|sha256 \".*\"|sha256 \"${SHA256}\"|" "$TAP_DIR/Formula/vcopilot.rb"
+
+git -C "$TAP_DIR" add Formula/vcopilot.rb
+git -C "$TAP_DIR" commit -m "vcopilot ${VERSION}"
+git -C "$TAP_DIR" push
+
+rm -rf "$TAP_DIR"
 rm "$TARBALL"
 
 echo ""
