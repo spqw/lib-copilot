@@ -31,11 +31,11 @@ TAG="v${VERSION}"
 
 echo "Releasing ${TAG}"
 
-# Create tarball
+# Create tarball (scoped package @spqw/vcopilot -> spqw-vcopilot-VERSION.tgz)
 npm pack
-TARBALL="lib-copilot-${VERSION}.tgz"
-mv "$TARBALL" "vcopilot-${VERSION}.tgz"
+PACK_TARBALL=$(ls -1 spqw-vcopilot-*.tgz 2>/dev/null || ls -1 lib-copilot-*.tgz 2>/dev/null)
 TARBALL="vcopilot-${VERSION}.tgz"
+mv "$PACK_TARBALL" "$TARBALL"
 
 # Commit, tag, push
 git add package.json package-lock.json 2>/dev/null || git add package.json
@@ -48,15 +48,24 @@ gh release create "$TAG" "$TARBALL" \
   --title "$TAG" \
   --generate-notes
 
+# Publish to npm private registry
+echo "Publishing to npm..."
+npm publish
+
 # Update Homebrew formula
 SHA256=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
 URL="https://github.com/spqw/lib-copilot/releases/download/${TAG}/${TARBALL}"
 
 TAP_DIR=$(mktemp -d)
-git clone git@github.com:spqw/homebrew-tap.git "$TAP_DIR"
+git clone https://github.com/spqw/homebrew-tap.git "$TAP_DIR"
 
-sed -i '' "s|url \".*\"|url \"${URL}\"|" "$TAP_DIR/Formula/vcopilot.rb"
-sed -i '' "s|sha256 \".*\"|sha256 \"${SHA256}\"|" "$TAP_DIR/Formula/vcopilot.rb"
+if [[ "$(uname)" == "Darwin" ]]; then
+  sed -i '' "s|url \".*\"|url \"${URL}\"|" "$TAP_DIR/Formula/vcopilot.rb"
+  sed -i '' "s|sha256 \".*\"|sha256 \"${SHA256}\"|" "$TAP_DIR/Formula/vcopilot.rb"
+else
+  sed -i "s|url \".*\"|url \"${URL}\"|" "$TAP_DIR/Formula/vcopilot.rb"
+  sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" "$TAP_DIR/Formula/vcopilot.rb"
+fi
 
 git -C "$TAP_DIR" add Formula/vcopilot.rb
 git -C "$TAP_DIR" commit -m "vcopilot ${VERSION}"
