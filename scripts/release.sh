@@ -53,7 +53,7 @@ echo "Publishing to npm..."
 npm publish
 
 # Update Homebrew tap
-skill publish homebrew \
+publish-homebrew \
   --tap spqw/homebrew-tap \
   --formula vcopilot \
   --repo spqw/lib-copilot \
@@ -64,7 +64,7 @@ skill publish homebrew \
   --bin vcopilot
 
 # Update mise plugin (regenerates scripts if changed)
-skill publish mise \
+publish-mise \
   --plugin-repo spqw/asdf-vcopilot \
   --repo spqw/lib-copilot \
   --tool vcopilot \
