@@ -107,10 +107,10 @@ function printInstructions(port: number, backend: string, models: string[]) {
   log('  Model:     chatgpt');
   log('');
   log('Claude Code:');
-  log(`  OPENAI_API_KEY=sk-vcopilot OPENAI_BASE_URL=${baseUrl} claude`);
+  log(`  OPENAI_API_KEY=sk-vcopilot OPENAI_BASE_URL=${baseUrl} claude --model chatgpt`);
   log('');
   log('Codex (OpenAI):');
-  log(`  OPENAI_API_KEY=sk-vcopilot OPENAI_BASE_URL=${baseUrl} codex`);
+  log(`  OPENAI_API_KEY=sk-vcopilot OPENAI_BASE_URL=${baseUrl} codex --model chatgpt`);
   log('');
   log('Cursor:');
   log('  Settings > Models > OpenAI API Key: sk-vcopilot');
