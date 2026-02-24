@@ -109,6 +109,9 @@ function printInstructions(port: number, backend: string, models: string[]) {
   log('Claude Code:');
   log(`  OPENAI_API_KEY=sk-vcopilot OPENAI_BASE_URL=${baseUrl} claude`);
   log('');
+  log('Codex (OpenAI):');
+  log(`  OPENAI_API_KEY=sk-vcopilot OPENAI_BASE_URL=${baseUrl} codex`);
+  log('');
   log('Cursor:');
   log('  Settings > Models > OpenAI API Key: sk-vcopilot');
   log(`  Override OpenAI Base URL: ${baseUrl}`);
