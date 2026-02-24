@@ -11,6 +11,11 @@ import * as os from 'os';
 
 const DEFAULT_MODEL = 'gpt-4.1';
 
+/** Always-on status logging to stderr (visible progress for the user) */
+function status(tag: string, msg: string) {
+  process.stderr.write(`[${tag}] ${msg}\n`);
+}
+
 // Premium request multipliers per model (paid plans)
 // Source: https://docs.github.com/en/copilot/reference/ai-models/supported-models
 const MULTIPLIERS: Record<string, number> = {
@@ -55,6 +60,7 @@ function parseArgs(argv: string[]): {
   copilot: boolean;
   version: boolean;
   update: boolean;
+  sync: boolean;
   endpoint?: string;
   positional: string[];
 } {
@@ -72,6 +78,7 @@ function parseArgs(argv: string[]): {
     copilot: false,
     version: false,
     update: false,
+    sync: false,
     endpoint: undefined as string | undefined,
     positional: [] as string[],
   };
@@ -109,6 +116,8 @@ function parseArgs(argv: string[]): {
       result.version = true;
     } else if (arg === '--update') {
       result.update = true;
+    } else if (arg === '--sync') {
+      result.sync = true;
     } else if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
@@ -135,6 +144,7 @@ Usage:
 Options:
   --model <name>      Model to use (default: ${DEFAULT_MODEL})
   --system <text>     System prompt
+  --sync              Synchronous mode (no sender/watcher split)
   --debug             Enable debug logging
   -v, --version       Show version
   --update            Update to latest version
@@ -218,10 +228,10 @@ function ensureLocalModel(model: string, debug: boolean): void {
 async function authenticate(auth: CopilotAuth, debug: boolean, forceVSCode: boolean = false): Promise<string> {
   // 1. --vscode flag (highest priority)
   if (forceVSCode) {
-    if (debug) process.stderr.write('[auth] forcing VSCode session auth\n');
+    status('auth', 'looking for VSCode session...');
     const vscode = await auth.authenticateWithVSCode();
     if (vscode) {
-      if (debug) process.stderr.write('[auth] using VSCode session token\n');
+      status('auth', 'using VSCode session token');
       return vscode.token;
     }
     throw new Error(
@@ -235,23 +245,24 @@ async function authenticate(auth: CopilotAuth, debug: boolean, forceVSCode: bool
   // 2. Try env vars
   const envToken = process.env.GITHUB_TOKEN || process.env.COPILOT_TOKEN;
   if (envToken) {
-    if (debug) process.stderr.write('[auth] using env token\n');
+    const envName = process.env.GITHUB_TOKEN ? 'GITHUB_TOKEN' : 'COPILOT_TOKEN';
+    status('auth', `using ${envName} env var`);
     return envToken;
   }
 
   // 3. Try cached token
   const cached = auth['getCachedToken']();
   if (cached) {
-    if (debug) process.stderr.write('[auth] using cached token\n');
+    status('auth', 'using cached token (~/.copilot/token.json)');
     return cached;
   }
 
   // 4. Auto device flow (last resort)
-  process.stderr.write('No token found. Starting device flow authentication...\n');
+  status('auth', 'no token found, starting device flow authentication...');
   const flow = await auth.initiateDeviceFlow();
   process.stderr.write(`\nOpen: ${flow.verification_uri}\nEnter code: ${flow.user_code}\n\nWaiting for authorization...\n`);
   const result = await auth.pollDeviceFlow(flow.device_code);
-  process.stderr.write('Authenticated successfully.\n');
+  status('auth', 'authenticated successfully');
   return result.token;
 }
 
@@ -483,8 +494,10 @@ async function main(): Promise<void> {
       prompt = `${args.system}\n\n${prompt}`;
     }
 
-    process.stderr.write('[chatgpt] model: ChatGPT (browser)\n');
-    const response = await chatGPT(prompt, args.debug);
+    status('chatgpt', 'model: ChatGPT (browser)');
+    status('chatgpt', `prompt: ${prompt.length} chars`);
+    const response = await chatGPT(prompt, { debug: args.debug, sync: args.sync });
+    status('chatgpt', `done (${response.length} chars received)`);
     process.stdout.write(response);
     process.stdout.write('\n');
     return;
@@ -621,18 +634,23 @@ async function main(): Promise<void> {
   }
   messages.push({ role: 'user', content: prompt });
 
+  const tag = isLocal ? 'local' : 'copilot';
+  const modelLabel = args.model === DEFAULT_MODEL && isLocal ? 'default' : args.model;
+  status(tag, `model: ${modelLabel}`);
+  status(tag, `prompt: ${prompt.length} chars`);
+
   if (args.debug) {
     process.stderr.write(`[debug] model=${args.model} prompt_length=${prompt.length}\n`);
   }
 
   // Stream response: content to stdout, status to stderr
-  const modelLabel = args.model === DEFAULT_MODEL && isLocal ? 'default' : args.model;
-  process.stderr.write(`${isLocal ? '[local] ' : ''}model: ${modelLabel}\n`);
-
+  status(tag, 'streaming response...');
+  let totalChars = 0;
   const requestModel = (args.model === DEFAULT_MODEL && isLocal) ? undefined : args.model;
   await client.chatStream(
     { messages, model: requestModel },
     (chunk) => {
+      totalChars += chunk.length;
       process.stdout.write(chunk);
     },
     (error) => {
@@ -642,6 +660,7 @@ async function main(): Promise<void> {
 
   // Ensure trailing newline
   process.stdout.write('\n');
+  status(tag, `done (${totalChars} chars received)`);
 }
 
 main().catch((error) => {

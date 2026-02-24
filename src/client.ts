@@ -29,6 +29,12 @@ export class CopilotClient {
   private local: boolean;
   private auth: any; // CopilotAuth instance for session disk caching
 
+  /** Always-on status logging to stderr */
+  private status(msg: string) {
+    const tag = this.local ? 'local' : 'copilot';
+    process.stderr.write(`[${tag}] ${msg}\n`);
+  }
+
   private extensionInfo: VSCodeExtensionInfo = {
     version: '1.200.0', // Copilot version
     userAgent: 'GitHub-Copilot/1.200.0 VSCode/1.95.0',
@@ -91,6 +97,7 @@ export class CopilotClient {
     const maxAttempts = 3;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
+        this.status(`exchanging token for session (attempt ${attempt + 1}/${maxAttempts})...`);
         if (this.debug) console.log(`[Copilot Client] Exchanging GitHub token for Copilot session token (attempt ${attempt + 1})...`);
 
         const response = await axios.get('https://api.github.com/copilot_internal/v2/token', {
@@ -121,6 +128,7 @@ export class CopilotClient {
           this.auth.saveSession(this.token, this.tokenExpiresAt);
         }
 
+        this.status('session token obtained');
         if (this.debug) {
           console.log('[Copilot Client] Session token obtained, expires:', new Date(this.tokenExpiresAt).toISOString());
         }
@@ -263,6 +271,7 @@ export class CopilotClient {
         stream: true,
       };
 
+      this.status('connecting...');
       if (this.debug) {
         console.log('[Copilot] Chat stream started');
       }
@@ -270,6 +279,7 @@ export class CopilotClient {
       const response = await this.client.post('/chat/completions', payload, {
         responseType: 'stream',
       });
+      this.status('streaming...');
 
       return new Promise((resolve, reject) => {
         let buffer = '';
