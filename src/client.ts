@@ -20,7 +20,7 @@ import {
  */
 export class CopilotClient {
   private client: AxiosInstance;
-  private githubToken: string | null = null; // The GitHub PAT
+  private githubToken: string | null = null; // The GitHub OAuth token
   private token: string | null = null;       // The Copilot session token
   private tokenExpiresAt: number = 0;
   private endpoint: string;

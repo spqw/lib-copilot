@@ -5,11 +5,10 @@ import * as os from 'os';
 
 /**
  * GitHub Copilot Authentication Handler
- * 
+ *
  * Supports multiple authentication methods:
- * 1. GitHub token (PAT)
- * 2. Device flow (browser-based)
- * 3. VSCode extension session (if available)
+ * 1. Device flow (browser-based OAuth)
+ * 2. VSCode extension session (if available)
  */
 
 export interface AuthToken {
@@ -86,6 +85,24 @@ export class CopilotAuth {
   }
 
   /**
+   * Get cached token with metadata (token + timestamp).
+   */
+  public getCachedTokenInfo(): { token: string; timestamp?: string } | null {
+    try {
+      if (fs.existsSync(this.tokenPath)) {
+        const data = fs.readFileSync(this.tokenPath, 'utf-8');
+        const parsed = JSON.parse(data);
+        if (parsed.token) {
+          return { token: parsed.token, timestamp: parsed.timestamp };
+        }
+      }
+    } catch (e) {
+      if (this.debug) console.log('[Auth] Failed to read cached token info:', e);
+    }
+    return null;
+  }
+
+  /**
    * Save GitHub OAuth token to disk (no expiry — device flow tokens don't expire).
    */
   private saveToken(token: string): void {
@@ -150,64 +167,52 @@ export class CopilotAuth {
   }
 
   /**
-   * Authenticate with GitHub token (Personal Access Token)
-   */
-  public async authenticateWithGitHub(token: string): Promise<AuthToken> {
-    try {
-      // Verify token by making a request to GitHub API
-      const response = await this.client.get('https://api.github.com/user', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/vnd.github.v3+json',
-        },
-      });
-
-      if (this.debug) console.log('[Auth] GitHub authentication successful:', response.data.login);
-
-      this.saveToken(token);
-
-      return {
-        token,
-        type: 'github',
-        scopes: response.headers['x-oauth-scopes']?.split(',').map((s: string) => s.trim()),
-      };
-    } catch (error) {
-      throw new Error(`GitHub authentication failed: ${this.formatError(error)}`);
-    }
-  }
-
-  /**
    * Authenticate with VSCode extension session
-   * Reads from VSCode's cached token location
+   * Reads from VSCode's cached token location (checks macOS, Linux, and remote paths)
    */
   public async authenticateWithVSCode(): Promise<AuthToken | null> {
-    try {
-      const vscodeTokenPath = path.join(
-        os.homedir(),
-        '.vscode-server',
-        'data',
-        'User',
-        'globalStorage',
-        'github.copilot',
-        'token.json'
-      );
+    const home = os.homedir();
+    const candidatePaths = [
+      // macOS: VSCode desktop
+      path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'github.copilot', 'hosts.json'),
+      path.join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', 'github.copilot', 'token.json'),
+      // Linux: VSCode desktop
+      path.join(home, '.config', 'Code', 'User', 'globalStorage', 'github.copilot', 'hosts.json'),
+      path.join(home, '.config', 'Code', 'User', 'globalStorage', 'github.copilot', 'token.json'),
+      // Linux: VSCode remote server
+      path.join(home, '.vscode-server', 'data', 'User', 'globalStorage', 'github.copilot', 'hosts.json'),
+      path.join(home, '.vscode-server', 'data', 'User', 'globalStorage', 'github.copilot', 'token.json'),
+    ];
 
-      if (fs.existsSync(vscodeTokenPath)) {
-        const data = fs.readFileSync(vscodeTokenPath, 'utf-8');
+    for (const tokenPath of candidatePaths) {
+      try {
+        if (!fs.existsSync(tokenPath)) continue;
+
+        const data = fs.readFileSync(tokenPath, 'utf-8');
         const parsed = JSON.parse(data);
 
-        if (this.debug) console.log('[Auth] VSCode token found');
+        // hosts.json format: { "github.com": "gho_..." }
+        if (tokenPath.endsWith('hosts.json')) {
+          const hostToken = parsed['github.com'];
+          if (hostToken) {
+            if (this.debug) console.log(`[Auth] VSCode token found in ${tokenPath}`);
+            return { token: hostToken, type: 'vscode' };
+          }
+          continue;
+        }
 
-        return {
-          token: parsed.token || parsed.access_token,
-          type: 'vscode',
-          expiresAt: parsed.expiresAt,
-        };
+        // token.json format: { "token": "...", "access_token": "..." }
+        const token = parsed.token || parsed.access_token;
+        if (token) {
+          if (this.debug) console.log(`[Auth] VSCode token found in ${tokenPath}`);
+          return { token, type: 'vscode', expiresAt: parsed.expiresAt };
+        }
+      } catch (e) {
+        if (this.debug) console.log(`[Auth] Failed to read ${tokenPath}:`, e);
       }
-    } catch (e) {
-      if (this.debug) console.log('[Auth] VSCode token not available:', e);
     }
 
+    if (this.debug) console.log('[Auth] No VSCode token found in any known location');
     return null;
   }
 
