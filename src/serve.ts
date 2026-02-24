@@ -48,6 +48,17 @@ function generateId(): string {
   return 'chatcmpl-' + Date.now().toString(36) + Math.random().toString(36).substring(2, 8);
 }
 
+// Default model always available — routed through ChatGPT browser automation
+const CHATGPT_MODEL = {
+  id: 'chatgpt',
+  object: 'model' as const,
+  created: 1700000000,
+  owned_by: 'vcopilot',
+  permission: [],
+  root: 'chatgpt',
+  parent: null,
+};
+
 async function authenticate(
   auth: CopilotAuth,
   debug: boolean,
@@ -68,6 +79,57 @@ async function authenticate(
   throw new Error(
     'No GitHub token found. Set GITHUB_TOKEN env var or run vcopilot --login first.'
   );
+}
+
+function printInstructions(port: number, backend: string, models: string[]) {
+  const baseUrl = `http://127.0.0.1:${port}/v1`;
+  const modelList = models.join(', ');
+
+  log('');
+  log('=== OpenAI-compatible API server ===');
+  log('');
+  log(`  Base URL:  ${baseUrl}`);
+  log(`  API Key:   sk-vcopilot (any value works)`);
+  log(`  Models:    ${modelList}`);
+  log(`  Backend:   ${backend}`);
+  log('');
+  log('Endpoints:');
+  log(`  GET  ${baseUrl}/models`);
+  log(`  POST ${baseUrl}/chat/completions`);
+  log(`  GET  http://127.0.0.1:${port}/health`);
+  log('');
+  log('=== Setup for coding agents ===');
+  log('');
+  log('Kilo Code / Roo Code (VSCode):');
+  log('  Provider:  OpenAI Compatible');
+  log(`  Base URL:  ${baseUrl}`);
+  log('  API Key:   sk-vcopilot');
+  log('  Model:     chatgpt');
+  log('');
+  log('Claude Code:');
+  log(`  OPENAI_API_KEY=sk-vcopilot OPENAI_BASE_URL=${baseUrl} claude`);
+  log('');
+  log('Cursor:');
+  log('  Settings > Models > OpenAI API Key: sk-vcopilot');
+  log(`  Override OpenAI Base URL: ${baseUrl}`);
+  log('');
+  log('Aider:');
+  log(`  aider --openai-api-key sk-vcopilot --openai-api-base ${baseUrl} --model openai/chatgpt`);
+  log('');
+  log('Continue:');
+  log('  In config.json, add provider with:');
+  log(`    "apiBase": "${baseUrl}"`);
+  log('    "apiKey": "sk-vcopilot"');
+  log('    "model": "chatgpt"');
+  log('');
+  log('cURL:');
+  log(`  curl ${baseUrl}/chat/completions \\`);
+  log('    -H "Content-Type: application/json" \\');
+  log('    -H "Authorization: Bearer sk-vcopilot" \\');
+  log('    -d \'{"model":"chatgpt","messages":[{"role":"user","content":"hello"}]}\'');
+  log('');
+  log('=================================');
+  log('');
 }
 
 export async function startServer(options: ServeOptions): Promise<void> {
@@ -98,16 +160,18 @@ export async function startServer(options: ServeOptions): Promise<void> {
 
   // Set up auth + client for Copilot API mode
   const auth = new CopilotAuth(debug);
-  let token: string | undefined;
   let client: CopilotClient | undefined;
 
+  // Cached models list (fetched once on first /v1/models call)
+  let cachedModels: any[] | null = null;
+
   try {
-    token = await authenticate(auth, debug, vscode);
+    const token = await authenticate(auth, debug, vscode);
     client = new CopilotClient({ token, debug, auth });
     log('authenticated with GitHub Copilot');
   } catch (err: any) {
     log(`copilot auth skipped: ${err.message}`);
-    log('will use ChatGPT browser mode as fallback');
+    log('using ChatGPT browser mode');
   }
 
   const server = http.createServer(async (req, res) => {
@@ -130,20 +194,21 @@ export async function startServer(options: ServeOptions): Promise<void> {
     try {
       // GET /v1/models
       if (pathname === '/v1/models' && req.method === 'GET') {
-        if (client) {
-          const models = await client.getModelsDetailed();
-          jsonResponse(res, 200, { object: 'list', data: models });
+        const models = await getModels();
+        jsonResponse(res, 200, { object: 'list', data: models });
+        return;
+      }
+
+      // GET /v1/models/:id
+      if (pathname.startsWith('/v1/models/') && req.method === 'GET') {
+        const modelId = pathname.slice('/v1/models/'.length);
+        const models = await getModels();
+        const model = models.find((m: any) => m.id === modelId);
+        if (model) {
+          jsonResponse(res, 200, model);
         } else {
-          jsonResponse(res, 200, {
-            object: 'list',
-            data: [
-              {
-                id: 'chatgpt',
-                object: 'model',
-                created: Math.floor(Date.now() / 1000),
-                owned_by: 'chatgpt-browser',
-              },
-            ],
+          jsonResponse(res, 404, {
+            error: { message: `Model '${modelId}' not found`, type: 'invalid_request_error' },
           });
         }
         return;
@@ -162,7 +227,7 @@ export async function startServer(options: ServeOptions): Promise<void> {
           log(`model=${model} messages=${messages.length} stream=${stream}`);
         }
 
-        // Decide backend: if model is "chatgpt" or no copilot client, use browser
+        // Route: "chatgpt" model or no copilot client → browser automation
         const useChatGPT = model === 'chatgpt' || !client;
 
         if (useChatGPT) {
@@ -175,7 +240,9 @@ export async function startServer(options: ServeOptions): Promise<void> {
             })
             .join('\n\n');
 
+          log(`chatgpt: sending ${prompt.length} chars...`);
           const response = await chatGPT(prompt, { debug });
+          log(`chatgpt: received ${response.length} chars`);
 
           if (stream) {
             res.writeHead(200, {
@@ -185,19 +252,17 @@ export async function startServer(options: ServeOptions): Promise<void> {
               'Access-Control-Allow-Origin': '*',
             });
 
-            // Send the full response as a single chunk (ChatGPT gives us the whole thing)
+            // Send role chunk first, then content, then stop
             sseChunk(res, {
               id: requestId,
               object: 'chat.completion.chunk',
               created: timestamp,
               model: 'chatgpt',
-              choices: [
-                {
-                  index: 0,
-                  delta: { role: 'assistant', content: response },
-                  finish_reason: null,
-                },
-              ],
+              choices: [{
+                index: 0,
+                delta: { role: 'assistant' },
+                finish_reason: null,
+              }],
             });
 
             sseChunk(res, {
@@ -205,13 +270,23 @@ export async function startServer(options: ServeOptions): Promise<void> {
               object: 'chat.completion.chunk',
               created: timestamp,
               model: 'chatgpt',
-              choices: [
-                {
-                  index: 0,
-                  delta: {},
-                  finish_reason: 'stop',
-                },
-              ],
+              choices: [{
+                index: 0,
+                delta: { content: response },
+                finish_reason: null,
+              }],
+            });
+
+            sseChunk(res, {
+              id: requestId,
+              object: 'chat.completion.chunk',
+              created: timestamp,
+              model: 'chatgpt',
+              choices: [{
+                index: 0,
+                delta: {},
+                finish_reason: 'stop',
+              }],
             });
 
             res.write('data: [DONE]\n\n');
@@ -222,17 +297,15 @@ export async function startServer(options: ServeOptions): Promise<void> {
               object: 'chat.completion',
               created: timestamp,
               model: 'chatgpt',
-              choices: [
-                {
-                  index: 0,
-                  message: { role: 'assistant', content: response },
-                  finish_reason: 'stop',
-                },
-              ],
+              choices: [{
+                index: 0,
+                message: { role: 'assistant', content: response },
+                finish_reason: 'stop',
+              }],
               usage: {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
+                prompt_tokens: Math.ceil(prompt.length / 4),
+                completion_tokens: Math.ceil(response.length / 4),
+                total_tokens: Math.ceil((prompt.length + response.length) / 4),
               },
             });
           }
@@ -256,13 +329,11 @@ export async function startServer(options: ServeOptions): Promise<void> {
                 object: 'chat.completion.chunk',
                 created: timestamp,
                 model,
-                choices: [
-                  {
-                    index: 0,
-                    delta: { content: chunk },
-                    finish_reason: null,
-                  },
-                ],
+                choices: [{
+                  index: 0,
+                  delta: { content: chunk },
+                  finish_reason: null,
+                }],
               });
             },
             (error) => {
@@ -275,13 +346,11 @@ export async function startServer(options: ServeOptions): Promise<void> {
             object: 'chat.completion.chunk',
             created: timestamp,
             model,
-            choices: [
-              {
-                index: 0,
-                delta: {},
-                finish_reason: 'stop',
-              },
-            ],
+            choices: [{
+              index: 0,
+              delta: {},
+              finish_reason: 'stop',
+            }],
           });
 
           res.write('data: [DONE]\n\n');
@@ -309,6 +378,7 @@ export async function startServer(options: ServeOptions): Promise<void> {
         jsonResponse(res, 200, {
           status: 'ok',
           backend: client ? 'copilot' : 'chatgpt-browser',
+          models: (await getModels()).map((m: any) => m.id),
         });
         return;
       }
@@ -325,19 +395,46 @@ export async function startServer(options: ServeOptions): Promise<void> {
     }
   });
 
-  server.listen(port, '127.0.0.1', () => {
-    log(`OpenAI-compatible server listening on http://127.0.0.1:${port}/v1`);
-    log(`endpoints:`);
-    log(`  GET  /v1/models`);
-    log(`  POST /v1/chat/completions`);
-    log(`  GET  /health`);
+  // Helper: get models list (chatgpt always first, then copilot models if available)
+  async function getModels(): Promise<any[]> {
+    if (cachedModels) return cachedModels;
+
+    const models: any[] = [CHATGPT_MODEL];
+
     if (client) {
-      log(`backend: GitHub Copilot API`);
-    } else {
-      log(`backend: ChatGPT (browser automation)`);
+      try {
+        const copilotModels = await client.getModelsDetailed();
+        for (const m of copilotModels) {
+          // Don't duplicate if copilot also has a "chatgpt" model
+          if (m.id !== 'chatgpt') {
+            models.push({
+              id: m.id,
+              object: 'model',
+              created: m.created || 1700000000,
+              owned_by: m.owned_by || 'github-copilot',
+              permission: m.permission || [],
+              root: m.root || m.id,
+              parent: m.parent || null,
+            });
+          }
+        }
+      } catch (err: any) {
+        if (debug) log(`failed to fetch copilot models: ${err.message}`);
+      }
     }
 
-    // Write PID file even in foreground mode
+    cachedModels = models;
+    return models;
+  }
+
+  server.listen(port, '127.0.0.1', async () => {
+    const models = await getModels();
+    const modelIds = models.map((m: any) => m.id);
+    const backend = client ? 'GitHub Copilot API + ChatGPT browser' : 'ChatGPT (browser automation)';
+
+    printInstructions(port, backend, modelIds);
+
+    // Write PID file
     const pidDir = path.dirname(PID_FILE);
     if (!fs.existsSync(pidDir)) fs.mkdirSync(pidDir, { recursive: true });
     fs.writeFileSync(PID_FILE, String(process.pid));
