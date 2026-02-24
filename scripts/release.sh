@@ -76,4 +76,7 @@ rm "$TARBALL"
 
 echo ""
 echo "Released ${TAG}"
-echo "  https://github.com/spqw/lib-copilot/releases/tag/${TAG}"
+echo "  GitHub:   https://github.com/spqw/lib-copilot/releases/tag/${TAG}"
+echo "  npm:      @spqw/vcopilot@${VERSION}"
+echo "  Homebrew: brew upgrade spqw/homebrew-tap/vcopilot"
+echo "  mise:     mise upgrade vcopilot  (auto-discovers new tags)"

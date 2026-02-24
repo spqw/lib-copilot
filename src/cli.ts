@@ -3,8 +3,11 @@
 import { CopilotClient } from './client';
 import { CopilotAuth } from './auth';
 import axios from 'axios';
-import { execSync, spawnSync } from 'child_process';
+import { execSync, spawn, spawnSync } from 'child_process';
 import { chatGPT } from './chatgpt';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 
 const DEFAULT_MODEL = 'gpt-4.1';
 
@@ -252,9 +255,97 @@ async function authenticate(auth: CopilotAuth, debug: boolean, forceVSCode: bool
   return result.token;
 }
 
+const UPDATE_CHECK_FILE = path.join(os.homedir(), '.copilot', 'update-check.json');
+const UPDATE_CHECK_INTERVAL = 60 * 60 * 1000; // 1 hour
+
+function detectInstallMethod(): 'homebrew' | 'mise' | 'npm' {
+  try {
+    execSync('brew list spqw/homebrew-tap/vcopilot 2>/dev/null', { stdio: 'ignore' });
+    return 'homebrew';
+  } catch {}
+
+  try {
+    const miseResult = spawnSync('mise', ['which', 'vcopilot'], { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+    if (miseResult.status === 0 && miseResult.stdout.includes('mise')) {
+      return 'mise';
+    }
+  } catch {}
+
+  return 'npm';
+}
+
+function backgroundAutoUpdate(currentVersion: string): void {
+  // Check if we should skip (rate-limit to once per hour)
+  try {
+    if (fs.existsSync(UPDATE_CHECK_FILE)) {
+      const data = JSON.parse(fs.readFileSync(UPDATE_CHECK_FILE, 'utf-8'));
+      if (Date.now() - data.lastCheck < UPDATE_CHECK_INTERVAL) {
+        return;
+      }
+    }
+  } catch {}
+
+  // Save check timestamp immediately to prevent parallel checks
+  try {
+    const dir = path.dirname(UPDATE_CHECK_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(UPDATE_CHECK_FILE, JSON.stringify({ lastCheck: Date.now() }));
+  } catch {}
+
+  // Fire-and-forget: spawn a detached child process to check and update
+  const script = `
+    const https = require('https');
+    const { execSync } = require('child_process');
+
+    const options = {
+      hostname: 'api.github.com',
+      path: '/repos/spqw/lib-copilot/releases/latest',
+      headers: { 'User-Agent': 'vcopilot', 'Accept': 'application/vnd.github+json' },
+    };
+
+    https.get(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => data += chunk);
+      res.on('end', () => {
+        try {
+          const latest = JSON.parse(data).tag_name.replace(/^v/, '');
+          if (latest === '${currentVersion}') process.exit(0);
+
+          // Detect install method and update
+          let method = 'npm';
+          try { execSync('brew list spqw/homebrew-tap/vcopilot 2>/dev/null', { stdio: 'ignore' }); method = 'homebrew'; } catch {}
+          if (method === 'npm') {
+            try {
+              const r = execSync('mise which vcopilot 2>/dev/null', { encoding: 'utf-8' });
+              if (r.includes('mise')) method = 'mise';
+            } catch {}
+          }
+
+          if (method === 'homebrew') {
+            execSync('brew upgrade spqw/homebrew-tap/vcopilot 2>/dev/null', { stdio: 'ignore' });
+          } else if (method === 'mise') {
+            execSync('mise upgrade vcopilot 2>/dev/null', { stdio: 'ignore' });
+          } else {
+            execSync('npm update -g @spqw/vcopilot 2>/dev/null', { stdio: 'ignore' });
+          }
+        } catch {}
+      });
+    }).on('error', () => {});
+  `;
+
+  const child = spawn(process.execPath, ['-e', script], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const pkgVersion: string = require('../package.json').version;
+
+  // Background auto-update check on every run
+  backgroundAutoUpdate(pkgVersion);
 
   // --version: print version and exit
   if (args.version) {
@@ -278,19 +369,16 @@ async function main(): Promise<void> {
 
       process.stderr.write(`Update available: v${pkgVersion} → v${latest}\n`);
 
-      // Detect install method
-      let isHomebrew = false;
-      try {
-        execSync('brew list spqw/homebrew-tap/vcopilot 2>/dev/null', { stdio: 'ignore' });
-        isHomebrew = true;
-      } catch {}
-
-      if (isHomebrew) {
+      const method = detectInstallMethod();
+      if (method === 'homebrew') {
         process.stderr.write('Updating via Homebrew...\n');
         execSync('brew upgrade spqw/homebrew-tap/vcopilot', { stdio: 'inherit' });
+      } else if (method === 'mise') {
+        process.stderr.write('Updating via mise...\n');
+        execSync('mise upgrade vcopilot', { stdio: 'inherit' });
       } else {
         process.stderr.write('Updating via npm...\n');
-        execSync('npm update -g lib-copilot', { stdio: 'inherit' });
+        execSync('npm update -g @spqw/vcopilot', { stdio: 'inherit' });
       }
 
       process.stdout.write(`Updated vcopilot from v${pkgVersion} to v${latest}\n`);
