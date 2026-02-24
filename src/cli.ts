@@ -147,6 +147,7 @@ function printHelp(): void {
   process.stderr.write(`vcopilot - GitHub Copilot CLI
 
 Usage:
+  vcopilot code                               Interactive coding agent (REPL)
   cat PROMPT.md | vcopilot [options]          Pipe stdin as prompt
   vcopilot [options] "your prompt here"       Positional prompt
   vcopilot --login                            Authenticate via device flow
@@ -431,6 +432,13 @@ async function main(): Promise<void> {
       vscode: args.vscode,
       detached: args.detached,
     });
+    return;
+  }
+
+  // vcopilot code: interactive coding agent
+  if (args.positional[0] === 'code') {
+    const { startCodeSession } = require('./code');
+    await startCodeSession({ debug: args.debug, sync: args.sync });
     return;
   }
 
