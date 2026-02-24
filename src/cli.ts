@@ -49,6 +49,7 @@ function parseArgs(argv: string[]): {
   local: boolean;
   vscode: boolean;
   chatgpt: boolean;
+  copilot: boolean;
   version: boolean;
   update: boolean;
   endpoint?: string;
@@ -64,7 +65,8 @@ function parseArgs(argv: string[]): {
     usage: false,
     local: false,
     vscode: false,
-    chatgpt: false,
+    chatgpt: true,
+    copilot: false,
     version: false,
     update: false,
     endpoint: undefined as string | undefined,
@@ -96,6 +98,10 @@ function parseArgs(argv: string[]): {
       result.vscode = true;
     } else if (arg === '--chatgpt') {
       result.chatgpt = true;
+      result.copilot = false;
+    } else if (arg === '--copilot') {
+      result.copilot = true;
+      result.chatgpt = false;
     } else if (arg === '--version' || arg === '-v') {
       result.version = true;
     } else if (arg === '--update') {
@@ -142,8 +148,9 @@ Authentication:
     3. ~/.copilot/token.json      Cached from previous --login
     4. Device flow (automatic)    Browser-based OAuth fallback
 
-ChatGPT (browser automation via Playwriter):
-  --chatgpt           Use ChatGPT via browser automation (requires Playwriter extension)
+Processor (default: ChatGPT):
+  --chatgpt           Use ChatGPT via browser automation (default)
+  --copilot           Use GitHub Copilot API instead of ChatGPT
 
 Local models (LM Studio / OpenAI-compatible):
   --local             Use local LM Studio server (localhost:1234)
@@ -359,12 +366,17 @@ async function main(): Promise<void> {
     return;
   }
 
-  // --chatgpt: browser automation mode
-  if (args.chatgpt) {
-    // Determine prompt: stdin (piped) or positional args
+  // chatgpt: browser automation mode (default unless --copilot, --local, or --endpoint)
+  if (args.chatgpt && !args.copilot && !args.local && !args.endpoint) {
+    // Determine prompt: positional args prepended to stdin if both present
     let prompt: string;
     if (!process.stdin.isTTY) {
-      prompt = await readStdin();
+      const stdinContent = await readStdin();
+      if (args.positional.length > 0) {
+        prompt = args.positional.join(' ') + '\n\n' + stdinContent;
+      } else {
+        prompt = stdinContent;
+      }
     } else if (args.positional.length > 0) {
       prompt = args.positional.join(' ');
     } else {
@@ -491,10 +503,15 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Determine prompt: stdin (piped) or positional args
+  // Determine prompt: positional args prepended to stdin if both present
   let prompt: string;
   if (!process.stdin.isTTY) {
-    prompt = await readStdin();
+    const stdinContent = await readStdin();
+    if (args.positional.length > 0) {
+      prompt = args.positional.join(' ') + '\n\n' + stdinContent;
+    } else {
+      prompt = stdinContent;
+    }
   } else if (args.positional.length > 0) {
     prompt = args.positional.join(' ');
   } else {
