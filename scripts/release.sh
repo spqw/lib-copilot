@@ -52,26 +52,25 @@ gh release create "$TAG" "$TARBALL" \
 echo "Publishing to npm..."
 npm publish
 
-# Update Homebrew formula
-SHA256=$(shasum -a 256 "$TARBALL" | awk '{print $1}')
-URL="https://github.com/spqw/lib-copilot/releases/download/${TAG}/${TARBALL}"
+# Update Homebrew tap
+skill publish homebrew \
+  --tap spqw/homebrew-tap \
+  --formula vcopilot \
+  --repo spqw/lib-copilot \
+  --tag "$TAG" \
+  --asset "$TARBALL" \
+  --desc "GitHub Copilot CLI - pipe-friendly LLM interface" \
+  --depends-on node \
+  --bin vcopilot
 
-TAP_DIR=$(mktemp -d)
-git clone https://github.com/spqw/homebrew-tap.git "$TAP_DIR"
+# Update mise plugin (regenerates scripts if changed)
+skill publish mise \
+  --plugin-repo spqw/asdf-vcopilot \
+  --repo spqw/lib-copilot \
+  --tool vcopilot \
+  --asset "vcopilot-{version}.tgz" \
+  --type npm
 
-if [[ "$(uname)" == "Darwin" ]]; then
-  sed -i '' "s|url \".*\"|url \"${URL}\"|" "$TAP_DIR/Formula/vcopilot.rb"
-  sed -i '' "s|sha256 \".*\"|sha256 \"${SHA256}\"|" "$TAP_DIR/Formula/vcopilot.rb"
-else
-  sed -i "s|url \".*\"|url \"${URL}\"|" "$TAP_DIR/Formula/vcopilot.rb"
-  sed -i "s|sha256 \".*\"|sha256 \"${SHA256}\"|" "$TAP_DIR/Formula/vcopilot.rb"
-fi
-
-git -C "$TAP_DIR" add Formula/vcopilot.rb
-git -C "$TAP_DIR" commit -m "vcopilot ${VERSION}"
-git -C "$TAP_DIR" push
-
-rm -rf "$TAP_DIR"
 rm "$TARBALL"
 
 echo ""
