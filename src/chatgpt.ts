@@ -8,6 +8,7 @@ import * as path from 'path';
 import { spawn } from 'child_process';
 import { sendChatGPTMessage } from './chatgpt-sender';
 import { readJob, cleanupOldJobs } from './chatgpt-job';
+import { extractMarkdownFromPage } from './html-to-markdown';
 
 type Page = Awaited<ReturnType<typeof connectBrowser>>['page'];
 
@@ -252,9 +253,7 @@ async function waitForResponse(page: Page): Promise<string> {
     .catch(() => status('(response may still be streaming)'));
 
   status('extracting response...');
-  const messages = page.locator('[data-message-author-role="assistant"]');
-  const lastMessage = messages.last();
-  const responseText = (await lastMessage.textContent()) ?? '';
+  const responseText = await page.evaluate(extractMarkdownFromPage);
   status(`response received (${responseText.length} chars)`);
   return responseText;
 }

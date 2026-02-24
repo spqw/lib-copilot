@@ -4,6 +4,7 @@ import {
   readJob,
   updateJobStatus,
 } from './chatgpt-job';
+import { extractMarkdownFromPage } from './html-to-markdown';
 
 type Browser = Awaited<ReturnType<typeof chromium.connectOverCDP>>;
 type BrowserContext = Awaited<ReturnType<Browser['newContext']>>;
@@ -121,11 +122,9 @@ export async function watchChatGPTJob(
       await page.waitForTimeout(500);
     }
 
-    // 7. Extract response text
+    // 7. Extract response as markdown (walking DOM tree)
     status('extracting response...');
-    const messages = page.locator('[data-message-author-role="assistant"]');
-    const lastMessage = messages.last();
-    const responseText = (await lastMessage.textContent()) ?? '';
+    const responseText = await page.evaluate(extractMarkdownFromPage);
 
     // 8. Write completion to job file
     updateJobStatus(jobId, {

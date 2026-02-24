@@ -5,6 +5,7 @@ import { CopilotAuth } from './auth';
 import axios from 'axios';
 import { execSync, spawn, spawnSync } from 'child_process';
 import { chatGPT } from './chatgpt';
+import { startServer } from './serve';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -61,7 +62,10 @@ function parseArgs(argv: string[]): {
   version: boolean;
   update: boolean;
   sync: boolean;
+  serve: boolean;
+  detached: boolean;
   endpoint?: string;
+  outputFilePath?: string;
   positional: string[];
 } {
   const result = {
@@ -79,7 +83,10 @@ function parseArgs(argv: string[]): {
     version: false,
     update: false,
     sync: false,
+    serve: false,
+    detached: false,
     endpoint: undefined as string | undefined,
+    outputFilePath: undefined as string | undefined,
     positional: [] as string[],
   };
 
@@ -118,6 +125,12 @@ function parseArgs(argv: string[]): {
       result.update = true;
     } else if (arg === '--sync') {
       result.sync = true;
+    } else if (arg === '--serve') {
+      result.serve = true;
+    } else if (arg === '--detached') {
+      result.detached = true;
+    } else if (arg === '--output-file-path' && i + 1 < argv.length) {
+      result.outputFilePath = argv[++i];
     } else if (arg === '--help' || arg === '-h') {
       printHelp();
       process.exit(0);
@@ -142,13 +155,18 @@ Usage:
   vcopilot --usage                            Show premium quota
 
 Options:
-  --model <name>      Model to use (default: ${DEFAULT_MODEL})
-  --system <text>     System prompt
-  --sync              Synchronous mode (no sender/watcher split)
-  --debug             Enable debug logging
-  -v, --version       Show version
-  --update            Update to latest version
-  -h, --help          Show this help
+  --model <name>            Model to use (default: ${DEFAULT_MODEL})
+  --system <text>           System prompt
+  --output-file-path <path> Write response as Markdown to a file
+  --sync                    Synchronous mode (no sender/watcher split)
+  --debug                   Enable debug logging
+  -v, --version             Show version
+  --update                  Update to latest version
+  -h, --help                Show this help
+
+Server mode:
+  --serve                   Start an OpenAI-compatible API server
+  --serve --detached        Start server in background (daemon mode)
 
 Authentication:
   --login             Authenticate via browser-based device flow
@@ -173,11 +191,15 @@ Examples:
   echo "what is 2+2" | vcopilot
   cat PROMPT.md | vcopilot --model grok-code-fast-1 > output.md
   vcopilot "explain quicksort"
+  vcopilot "explain quicksort" --output-file-path response.md
   vcopilot --vscode "hello"
   vcopilot --local "what is 2+2"
   vcopilot --local --model openai/gpt-oss-20b "explain quicksort"
   vcopilot --endpoint http://192.168.1.10:1234/v1 "hello"
   vcopilot --chatgpt "explain quicksort"
+  vcopilot --serve                     # foreground server on :8787
+  vcopilot --serve --detached          # background daemon
+  VCOPILOT_PORT=9000 vcopilot --serve  # custom port
 `);
 }
 
@@ -400,6 +422,18 @@ async function main(): Promise<void> {
     return;
   }
 
+  // --serve: start OpenAI-compatible API server
+  if (args.serve) {
+    const port = parseInt(process.env.VCOPILOT_PORT || '8787', 10);
+    await startServer({
+      port,
+      debug: args.debug,
+      vscode: args.vscode,
+      detached: args.detached,
+    });
+    return;
+  }
+
   const auth = new CopilotAuth(args.debug);
 
   // --login: force re-auth via device flow
@@ -498,8 +532,13 @@ async function main(): Promise<void> {
     status('chatgpt', `prompt: ${prompt.length} chars`);
     const response = await chatGPT(prompt, { debug: args.debug, sync: args.sync });
     status('chatgpt', `done (${response.length} chars received)`);
-    process.stdout.write(response);
-    process.stdout.write('\n');
+    if (args.outputFilePath) {
+      fs.writeFileSync(args.outputFilePath, response + '\n');
+      status('chatgpt', `written to ${args.outputFilePath}`);
+    } else {
+      process.stdout.write(response);
+      process.stdout.write('\n');
+    }
     return;
   }
 
@@ -646,20 +685,30 @@ async function main(): Promise<void> {
   // Stream response: content to stdout, status to stderr
   status(tag, 'streaming response...');
   let totalChars = 0;
+  let collected = '';
   const requestModel = (args.model === DEFAULT_MODEL && isLocal) ? undefined : args.model;
   await client.chatStream(
     { messages, model: requestModel },
     (chunk) => {
       totalChars += chunk.length;
-      process.stdout.write(chunk);
+      if (args.outputFilePath) {
+        collected += chunk;
+      } else {
+        process.stdout.write(chunk);
+      }
     },
     (error) => {
       process.stderr.write(`\nStream error: ${error.message}\n`);
     }
   );
 
-  // Ensure trailing newline
-  process.stdout.write('\n');
+  if (args.outputFilePath) {
+    fs.writeFileSync(args.outputFilePath, collected + '\n');
+    status(tag, `written to ${args.outputFilePath}`);
+  } else {
+    // Ensure trailing newline
+    process.stdout.write('\n');
+  }
   status(tag, `done (${totalChars} chars received)`);
 }
 
