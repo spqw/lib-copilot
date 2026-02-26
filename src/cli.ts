@@ -508,7 +508,7 @@ async function main(): Promise<void> {
   }
 
   // chatgpt: browser automation mode (default unless --copilot, --local, or --endpoint)
-  if (args.chatgpt && !args.copilot && !args.local && !args.endpoint) {
+  if (args.chatgpt && !args.copilot && !args.local && !args.endpoint && !args.usage && !args.models) {
     // Determine prompt: positional args prepended to stdin if both present
     let prompt: string;
     if (!process.stdin.isTTY) {
