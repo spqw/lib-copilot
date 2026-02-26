@@ -643,7 +643,9 @@ async function main(): Promise<void> {
         process.stdout.write(`  ${val.remaining}/${val.entitlement} remaining (${val.percent_remaining.toFixed(1)}%)\n`);
         process.stdout.write(`  used: ${used.toFixed(1)} premium requests\n`);
         if (val.overage_count > 0) {
-          process.stdout.write(`  overage: ${val.overage_count}\n`);
+          const OVERAGE_RATE = 0.04; // USD per premium request
+          const cost = (val.overage_count * OVERAGE_RATE).toFixed(2);
+          process.stdout.write(`  paid additional: ${val.overage_count} premium requests ($${cost})\n`);
         }
         process.stdout.write('\n');
       }
