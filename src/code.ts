@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 import { chatGPT } from './chatgpt';
+import { CopilotClient } from './client';
+import { CopilotAuth } from './auth';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,6 +37,9 @@ interface DiffSummary {
 // ---------------------------------------------------------------------------
 
 const MAX_CONTEXT_CHARS = 200_000;
+const RELEVANCE_THRESHOLD = 50;
+const RELEVANCE_FALLBACK_THRESHOLD = 20;
+const MAX_FALLBACK_FILES = 3;
 
 const SKIP_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', '.next', '__pycache__',
@@ -58,6 +63,21 @@ const KNOWN_LANGUAGES = new Set([
   'json', 'graphql', 'proto', 'dockerfile', 'makefile', 'cmake', 'diff',
   'plaintext', 'text', 'txt', 'log', 'jsx', 'tsx',
 ]);
+
+const GREP_INCLUDES = [
+  '--include=*.ts', '--include=*.tsx', '--include=*.js', '--include=*.jsx',
+  '--include=*.json', '--include=*.md', '--include=*.py', '--include=*.go',
+  '--include=*.rs', '--include=*.rb', '--include=*.swift', '--include=*.kt',
+  '--include=*.java', '--include=*.c', '--include=*.cpp', '--include=*.h',
+  '--include=*.css', '--include=*.scss', '--include=*.html',
+  '--include=*.yaml', '--include=*.yml', '--include=*.toml',
+].join(' ');
+
+const GREP_EXCLUDES = [
+  '--exclude-dir=node_modules', '--exclude-dir=.git', '--exclude-dir=dist',
+  '--exclude-dir=build', '--exclude-dir=.next', '--exclude-dir=__pycache__',
+  '--exclude-dir=coverage',
+].join(' ');
 
 // ---------------------------------------------------------------------------
 // Utilities
@@ -179,9 +199,9 @@ function loadFile(relPath: string, workspaceRoot: string, files: Map<string, Fil
     const content = fs.readFileSync(absPath, 'utf-8');
     files.set(relPath, { absPath, relPath, content });
     const lines = content.split('\n').length;
-    status(`added: ${relPath} (${lines} lines)`);
+    status(`  loaded: ${relPath} (${lines} lines)`);
   } catch (err: any) {
-    status(`failed to read: ${relPath} (${err.message})`);
+    status(`  failed to read: ${relPath} (${err.message})`);
   }
 }
 
@@ -191,7 +211,7 @@ function refreshFiles(workspaceRoot: string, files: Map<string, FileContext>): v
       const fresh = fs.readFileSync(ctx.absPath, 'utf-8');
       if (fresh !== ctx.content) {
         ctx.content = fresh;
-        status(`refreshed: ${relPath}`);
+        status(`  refreshed: ${relPath}`);
       }
     } catch {}
   }
@@ -208,6 +228,206 @@ function extractMentions(input: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// AI-powered file discovery (GPT-4.1 via VSCode Copilot extension)
+// ---------------------------------------------------------------------------
+
+async function askCopilotForGrepPatterns(
+  client: CopilotClient,
+  query: string,
+  fileList: string[],
+): Promise<string[]> {
+  status('  asking GPT-4.1 for grep regex patterns...');
+
+  // Show a sample of the project structure
+  const sampleFiles = fileList.slice(0, 100).join('\n');
+
+  const response = await client.chat({
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'You are a code search assistant.',
+          'Given a coding task and a project file listing, suggest grep-compatible regex patterns to find source files that would need to be edited.',
+          'Return ONLY the regex patterns, one per line.',
+          'No explanations, no bullet points, no backticks, just raw grep-compatible patterns.',
+          'Keep patterns simple. Aim for 2-6 patterns that together cover the relevant code.',
+        ].join(' '),
+      },
+      {
+        role: 'user',
+        content: `Task: ${query}\n\nProject files (${fileList.length} total, showing first 100):\n${sampleFiles}`,
+      },
+    ],
+    model: 'gpt-4.1',
+    max_tokens: 300,
+  });
+
+  const content = response.choices[0]?.message.content || '';
+  const patterns = content
+    .split('\n')
+    .map(l => l.trim().replace(/^[-*]\s*/, '').replace(/^`|`$/g, ''))
+    .filter(l => l && l.length > 1 && !l.startsWith('#') && !l.startsWith('//'));
+
+  status(`  GPT-4.1 suggested ${patterns.length} pattern(s):`);
+  for (const p of patterns) {
+    status(`    -> ${p}`);
+  }
+
+  return patterns;
+}
+
+async function scoreFileRelevance(
+  client: CopilotClient,
+  filePath: string,
+  fileContent: string,
+  query: string,
+): Promise<number> {
+  // Truncate large files to keep requests fast
+  const maxChars = 4000;
+  const truncated = fileContent.length > maxChars
+    ? fileContent.slice(0, maxChars) + '\n...(truncated)'
+    : fileContent;
+
+  try {
+    const response = await client.chat({
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a code relevance scorer. Given a task and a source file, respond with ONLY a single integer 0-100 indicating how likely this file needs editing for the task. 0=irrelevant, 100=definitely needs changes. Reply with just the number, nothing else.',
+        },
+        {
+          role: 'user',
+          content: `Task: ${query}\n\nFile: ${filePath}\n\`\`\`\n${truncated}\n\`\`\``,
+        },
+      ],
+      model: 'gpt-4.1',
+      max_tokens: 10,
+    });
+
+    const raw = (response.choices[0]?.message.content || '0').trim();
+    const score = parseInt(raw.replace(/[^0-9]/g, ''), 10);
+    return isNaN(score) ? 0 : Math.min(100, Math.max(0, score));
+  } catch (err: any) {
+    status(`    scoring error for ${filePath}: ${err.message}`);
+    return 0;
+  }
+}
+
+/**
+ * AI-powered file discovery pipeline:
+ * 1. Ask GPT-4.1 (via VS Code Copilot) for grep regex patterns
+ * 2. Grep workspace to find candidate files
+ * 3. Score each candidate with GPT-4.1 for relevance (0-100)
+ * 4. Select files above threshold
+ */
+async function discoverRelevantFiles(
+  client: CopilotClient,
+  query: string,
+  workspaceRoot: string,
+  files: Map<string, FileContext>,
+): Promise<void> {
+  const allFiles = listProjectFiles(workspaceRoot);
+  status(`workspace indexed: ${allFiles.length} files`);
+
+  // ---- Step 1: Get grep patterns from GPT-4.1 ----
+  status('STEP 1/3: Getting grep patterns from GPT-4.1...');
+  let patterns: string[];
+  try {
+    patterns = await askCopilotForGrepPatterns(client, query, allFiles);
+  } catch (err: any) {
+    status(`  FAILED: ${err.message}`);
+    status('  tip: ensure VSCode Copilot extension is installed and authenticated');
+    return;
+  }
+
+  if (patterns.length === 0) {
+    status('  no patterns suggested — cannot auto-discover files');
+    status('  tip: add files manually with /add @file or @file inline');
+    return;
+  }
+
+  // ---- Step 2: Grep workspace ----
+  status('STEP 2/3: Grepping workspace for candidate files...');
+  const candidateFiles = new Set<string>();
+
+  for (const pattern of patterns) {
+    try {
+      const cmd = `grep -rln ${GREP_INCLUDES} ${GREP_EXCLUDES} -- ${escapeShellArg(pattern)} .`;
+      const result = execSync(cmd, {
+        encoding: 'utf-8',
+        cwd: workspaceRoot,
+        maxBuffer: 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const matched = result.trim().split('\n').filter(Boolean);
+      for (const f of matched) {
+        candidateFiles.add(f.replace(/^\.\//, ''));
+      }
+      status(`    "${pattern}" -> ${matched.length} file(s)`);
+    } catch {
+      status(`    "${pattern}" -> no matches`);
+    }
+  }
+
+  if (candidateFiles.size === 0) {
+    status('  no files matched any grep pattern');
+    status('  tip: add files manually with /add @file');
+    return;
+  }
+
+  status(`  ${candidateFiles.size} candidate file(s) found`);
+
+  // ---- Step 3: Score relevance with GPT-4.1 ----
+  status('STEP 3/3: Scoring file relevance with GPT-4.1...');
+  const scored: Array<{ file: string; score: number }> = [];
+  let idx = 0;
+  const total = candidateFiles.size;
+
+  for (const file of candidateFiles) {
+    idx++;
+    const absPath = path.resolve(workspaceRoot, file);
+    try {
+      const content = fs.readFileSync(absPath, 'utf-8');
+      const score = await scoreFileRelevance(client, file, content, query);
+      scored.push({ file, score });
+      const icon = score >= RELEVANCE_THRESHOLD ? '+' : '-';
+      status(`  [${idx}/${total}] ${icon} ${file}: ${score}/100`);
+    } catch (err: any) {
+      status(`  [${idx}/${total}] x ${file}: read error (${err.message})`);
+    }
+  }
+
+  // ---- Select relevant files ----
+  const relevant = scored
+    .filter(s => s.score >= RELEVANCE_THRESHOLD)
+    .sort((a, b) => b.score - a.score);
+
+  if (relevant.length === 0) {
+    // Fallback: use top N if any scored above a lower threshold
+    const top = scored
+      .sort((a, b) => b.score - a.score)
+      .slice(0, MAX_FALLBACK_FILES);
+
+    if (top.length > 0 && top[0].score >= RELEVANCE_FALLBACK_THRESHOLD) {
+      status(`no files scored >= ${RELEVANCE_THRESHOLD}, using top ${top.length} as fallback:`);
+      for (const t of top) {
+        loadFile(t.file, workspaceRoot, files);
+      }
+    } else {
+      status('no files deemed relevant enough');
+      status('tip: add files manually with /add @file');
+    }
+    return;
+  }
+
+  status(`${relevant.length} relevant file(s) selected for editing:`);
+  for (const r of relevant) {
+    loadFile(r.file, workspaceRoot, files);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Prompt composition
 // ---------------------------------------------------------------------------
 
@@ -217,10 +437,14 @@ function composePrompt(query: string, files: Map<string, FileContext>): string {
 ${query}
 </query_user>
 <rules>
-- MUST output ONLY the complete new file contents
-- MUST output the entire modified version, not just an extract
-- MUST NOT include explanations or comments about changes
-- MUST NOT include intro or conclusion
+- MUST return each modified file wrapped in a markdown code block (triple backticks)
+- MUST use the file path as the code block language tag, like: \`\`\`path/to/file.ts
+- MUST output the COMPLETE file contents, not just changed portions
+- MUST NOT omit any part of the file — include everything, even unchanged sections
+- MUST NOT include explanations, commentary, or any text outside the code blocks
+- MUST NOT include intro or conclusion text
+- If a file was not modified, do NOT include it in the output
+- Each file block MUST start with \`\`\` followed immediately by the file path and end with \`\`\`
 </rules>
 `;
 
@@ -246,6 +470,9 @@ function validateContextSize(files: Map<string, FileContext>): void {
   if (totalChars > MAX_CONTEXT_CHARS) {
     const kb = Math.round(totalChars / 1024);
     status(`warning: context is ${kb}KB — response quality may degrade`);
+  } else {
+    const kb = Math.round(totalChars / 1024);
+    status(`context size: ${kb}KB`);
   }
 }
 
@@ -279,23 +506,47 @@ function parseResponseFiles(response: string): ParsedFile[] {
   return results;
 }
 
+/**
+ * Parse response with multiple fallback strategies:
+ * 1. Code blocks with file path labels (preferred)
+ * 2. Single file: any code block treated as that file
+ * 3. Single file: bare content (no code fences) treated as file content
+ */
 function parseResponseWithFallback(
   response: string,
   contextFiles: Map<string, FileContext>,
 ): ParsedFile[] {
+  // Strategy 1: code blocks with file paths
   const parsed = parseResponseFiles(response);
-  if (parsed.length > 0) return parsed;
+  if (parsed.length > 0) {
+    status(`parsed ${parsed.length} file(s) from code blocks with file paths`);
+    return parsed;
+  }
 
-  // Fallback: single file in context — treat any code block as that file
+  // Strategy 2: single file, any code block
   if (contextFiles.size === 1) {
     const regex = /```\w*\n([\s\S]*?)```/g;
     const match = regex.exec(response);
     if (match) {
       const [relPath] = contextFiles.keys();
       const content = match[1];
+      status(`parsed 1 file from generic code block (single-file fallback)`);
       return [{
         filePath: relPath,
         content: content.endsWith('\n') ? content.slice(0, -1) : content,
+      }];
+    }
+  }
+
+  // Strategy 3: single file, bare content (no code fences at all)
+  if (contextFiles.size === 1) {
+    const trimmed = response.trim();
+    if (trimmed.length > 0) {
+      const [relPath] = contextFiles.keys();
+      status(`no code blocks found — treating entire response as file content for ${relPath}`);
+      return [{
+        filePath: relPath,
+        content: trimmed,
       }];
     }
   }
@@ -326,15 +577,13 @@ function computeDiffSummary(oldContent: string, newContent: string): DiffSummary
 
 function handleGrep(pattern: string, workspaceRoot: string): void {
   try {
-    const result = execSync(
-      `grep -rn --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' --include='*.json' --include='*.md' --include='*.py' --include='*.go' --include='*.rs' --include='*.rb' --include='*.swift' --include='*.kt' --include='*.java' --include='*.c' --include='*.cpp' --include='*.h' --include='*.css' --include='*.scss' --include='*.html' --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist --exclude-dir=build --exclude-dir=.next -- ${escapeShellArg(pattern)} .`,
-      {
-        encoding: 'utf-8',
-        cwd: workspaceRoot,
-        maxBuffer: 1024 * 1024,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }
-    );
+    const cmd = `grep -rn ${GREP_INCLUDES} ${GREP_EXCLUDES} -- ${escapeShellArg(pattern)} .`;
+    const result = execSync(cmd, {
+      encoding: 'utf-8',
+      cwd: workspaceRoot,
+      maxBuffer: 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
 
     const lines = result.trim().split('\n').slice(0, 20);
     const fileSet = new Set<string>();
@@ -473,9 +722,15 @@ async function handleQuery(
   workspaceRoot: string,
   files: Map<string, FileContext>,
   options: CodeSessionOptions,
+  copilotClient: CopilotClient | null,
 ): Promise<void> {
+  const startTime = Date.now();
+
   // 1. Extract and resolve inline @mentions
   const mentions = extractMentions(input);
+  if (mentions.length > 0) {
+    status(`resolving ${mentions.length} @mention(s)...`);
+  }
   for (const mention of mentions) {
     const resolved = resolveFileReference(mention, workspaceRoot);
     for (const rel of resolved) {
@@ -486,39 +741,62 @@ async function handleQuery(
   // 2. Clean query (remove @mentions since files are in context)
   const cleanQuery = input.replace(/@\S+/g, '').trim();
 
-  if (files.size === 0) {
-    status('no files in context. Add files with @file or /add first.');
-    return;
-  }
-
   if (!cleanQuery) {
     status('empty query after removing @mentions. Type your coding request.');
     return;
   }
 
-  // 3. Refresh files from disk
-  refreshFiles(workspaceRoot, files);
+  // 3. Auto-discover files if none in context and Copilot client available
+  if (files.size === 0 && copilotClient) {
+    status('');
+    status('=== AI-Powered File Discovery ===');
+    status(`query: "${cleanQuery}"`);
+    status('');
+    await discoverRelevantFiles(copilotClient, cleanQuery, workspaceRoot, files);
+    status('=================================');
+    status('');
+  }
 
-  // 4. Size check
-  validateContextSize(files);
-
-  // 5. Compose and send
-  const prompt = composePrompt(cleanQuery, files);
-  status(`sending ${files.size} file(s) + query (${prompt.length} chars)...`);
-
-  const response = await chatGPT(prompt, { debug: options.debug, sync: options.sync });
-  status(`response received (${response.length} chars)`);
-
-  // 6. Parse response
-  const parsedFiles = parseResponseWithFallback(response, files);
-
-  if (parsedFiles.length === 0) {
-    status('no file blocks detected in response. Raw output:');
-    process.stderr.write('\n' + response + '\n\n');
+  if (files.size === 0) {
+    status('no files in context.');
+    if (copilotClient) {
+      status('AI discovery found no relevant files.');
+    }
+    status('tip: add files with @file or /add @file first');
     return;
   }
 
-  // 7. Write files
+  // 4. Refresh files from disk
+  status('refreshing files from disk...');
+  refreshFiles(workspaceRoot, files);
+
+  // 5. Size check
+  validateContextSize(files);
+
+  // 6. Compose prompt and send to ChatGPT
+  const prompt = composePrompt(cleanQuery, files);
+  status(`sending ${files.size} file(s) + query to ChatGPT browser (${prompt.length} chars)...`);
+
+  const response = await chatGPT(prompt, { debug: options.debug, sync: options.sync });
+  status(`ChatGPT response received (${response.length} chars)`);
+
+  // 7. Parse response into file blocks
+  status('parsing response for file blocks...');
+  const parsedFiles = parseResponseWithFallback(response, files);
+
+  if (parsedFiles.length === 0) {
+    status('WARNING: no file blocks detected in response');
+    status('showing raw response:');
+    process.stderr.write('\n--- RAW RESPONSE START ---\n');
+    process.stderr.write(response);
+    process.stderr.write('\n--- RAW RESPONSE END ---\n\n');
+    return;
+  }
+
+  // 8. Write files to disk
+  status(`writing ${parsedFiles.length} file(s) to disk...`);
+  let filesWritten = 0;
+
   for (const pf of parsedFiles) {
     const relPath = pf.filePath;
     const existing = files.get(relPath);
@@ -527,10 +805,10 @@ async function handleQuery(
     // Diff summary
     if (existing) {
       const diff = computeDiffSummary(existing.content, pf.content);
-      status(`${relPath}: +${diff.added} -${diff.removed} ~${diff.changed}`);
+      status(`  ${relPath}: +${diff.added} -${diff.removed} ~${diff.changed} lines`);
     } else {
       const lines = pf.content.split('\n').length;
-      status(`${relPath}: new file (${lines} lines)`);
+      status(`  ${relPath}: NEW file (${lines} lines)`);
     }
 
     // Write
@@ -539,27 +817,37 @@ async function handleQuery(
       fs.mkdirSync(dir, { recursive: true });
     }
     fs.writeFileSync(absPath, pf.content.endsWith('\n') ? pf.content : pf.content + '\n');
-    status(`written: ${relPath}`);
+    status(`  written: ${relPath}`);
+    filesWritten++;
 
     // Update context
     const freshContent = fs.readFileSync(absPath, 'utf-8');
     files.set(relPath, { absPath, relPath, content: freshContent });
   }
 
-  status('done');
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  status(`done: ${filesWritten} file(s) written in ${elapsed}s`);
 }
 
 // ---------------------------------------------------------------------------
 // Help & Welcome
 // ---------------------------------------------------------------------------
 
-function printWelcome(workspaceRoot: string, isVSCode: boolean): void {
+function printWelcome(workspaceRoot: string, isVSCode: boolean, hasAI: boolean): void {
   process.stderr.write('\nvcopilot code — interactive coding agent\n');
   process.stderr.write(`workspace: ${workspaceRoot}\n`);
   if (isVSCode) {
     process.stderr.write('terminal:  VSCode (detected)\n');
   }
+  if (hasAI) {
+    process.stderr.write('discovery: AI-powered (GPT-4.1 via Copilot)\n');
+  } else {
+    process.stderr.write('discovery: manual (use @file or /add)\n');
+  }
   process.stderr.write('\nAdd files with @file, then type your coding query.\n');
+  if (hasAI) {
+    process.stderr.write('Or just type a query — AI will find relevant files automatically.\n');
+  }
   process.stderr.write('Type /help for commands.\n\n');
 }
 
@@ -577,12 +865,22 @@ Commands:
 Usage:
   Add files, then type any coding query to modify them.
   Use @file inline to add files on the fly.
+  If no files are in context and AI discovery is enabled,
+  files will be discovered automatically based on your query.
+
+Flow:
+  1. GPT-4.1 (Copilot) suggests grep patterns for your query
+  2. Workspace is grepped for candidate files
+  3. GPT-4.1 scores each candidate's relevance (0-100)
+  4. Relevant files are sent to ChatGPT with your query
+  5. ChatGPT returns modified files, which are written to disk
 
 Examples:
   /add @src/cli.ts
   /grep handleCommand
   add error handling to the main function
   @src/code.ts @src/cli.ts refactor the status function
+  refactor the auth module to use async/await
 \n`);
 }
 
@@ -595,7 +893,34 @@ export async function startCodeSession(options: CodeSessionOptions): Promise<voi
   const files: Map<string, FileContext> = new Map();
   const isVSCode = process.env.TERM_PROGRAM === 'vscode';
 
-  printWelcome(workspaceRoot, isVSCode);
+  // Authenticate with VSCode Copilot extension for AI-powered file discovery
+  let copilotClient: CopilotClient | null = null;
+  status('initializing...');
+  try {
+    status('looking for VSCode Copilot extension token...');
+    const auth = new CopilotAuth(options.debug);
+    const vscodeToken = await auth.authenticateWithVSCode();
+
+    if (vscodeToken) {
+      status('VSCode Copilot token found, creating client...');
+      copilotClient = new CopilotClient({
+        token: vscodeToken.token,
+        model: 'gpt-4.1',
+        debug: options.debug,
+        auth,
+      });
+      status('AI-powered file discovery enabled (GPT-4.1 via Copilot)');
+    } else {
+      status('VSCode Copilot extension not found');
+      status('tip: install GitHub Copilot in VSCode for automatic file discovery');
+      status('falling back to manual file selection (/add @file)');
+    }
+  } catch (err: any) {
+    status(`VSCode Copilot auth failed: ${err.message}`);
+    status('continuing with manual file selection');
+  }
+
+  printWelcome(workspaceRoot, isVSCode, copilotClient !== null);
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -619,10 +944,10 @@ export async function startCodeSession(options: CodeSessionOptions): Promise<voi
       if (trimmed.startsWith('/')) {
         await handleCommand(trimmed, workspaceRoot, files, rl);
       } else {
-        await handleQuery(trimmed, workspaceRoot, files, options);
+        await handleQuery(trimmed, workspaceRoot, files, options, copilotClient);
       }
     } catch (err: any) {
-      status(`error: ${err.message}`);
+      status(`ERROR: ${err.message}`);
       if (options.debug && err.stack) {
         process.stderr.write(err.stack + '\n');
       }
