@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 
-import { CopilotClient } from './client';
-import { CopilotAuth } from './auth';
-import axios from 'axios';
 import { execSync, spawn, spawnSync } from 'child_process';
-import { chatGPT } from './chatgpt';
-import { startServer } from './serve';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+
+// Heavy modules loaded lazily to keep --version / --help instant
+import type { CopilotClient as CopilotClientType } from './client';
+import type { CopilotAuth as CopilotAuthType } from './auth';
 
 const DEFAULT_MODEL = 'gpt-4.1';
 
@@ -248,7 +247,7 @@ function ensureLocalModel(model: string, debug: boolean): void {
   }
 }
 
-async function authenticate(auth: CopilotAuth, debug: boolean, forceVSCode: boolean = false): Promise<string> {
+async function authenticate(auth: CopilotAuthType, debug: boolean, forceVSCode: boolean = false): Promise<string> {
   // 1. --vscode flag (highest priority)
   if (forceVSCode) {
     status('auth', 'looking for VSCode session...');
@@ -378,17 +377,18 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const pkgVersion: string = require('../package.json').version;
 
-  // Background auto-update check on every run
-  backgroundAutoUpdate(pkgVersion);
-
-  // --version: print version and exit
+  // --version: print version and exit (fast path — no imports loaded yet)
   if (args.version) {
     process.stdout.write(`vcopilot ${pkgVersion}\n`);
     return;
   }
 
+  // Background auto-update check on every run
+  backgroundAutoUpdate(pkgVersion);
+
   // --update: check for updates and self-update
   if (args.update) {
+    const axios = require('axios').default;
     process.stderr.write('Checking for updates...\n');
     try {
       const res = await axios.get('https://api.github.com/repos/spqw/lib-copilot/releases/latest', {
@@ -425,6 +425,7 @@ async function main(): Promise<void> {
 
   // --serve: start OpenAI-compatible API server
   if (args.serve) {
+    const { startServer } = require('./serve');
     const port = parseInt(process.env.VCOPILOT_PORT || '8787', 10);
     await startServer({
       port,
@@ -442,6 +443,7 @@ async function main(): Promise<void> {
     return;
   }
 
+  const { CopilotAuth } = require('./auth') as { CopilotAuth: typeof CopilotAuthType };
   const auth = new CopilotAuth(args.debug);
 
   // --login: force re-auth via device flow
@@ -538,6 +540,7 @@ async function main(): Promise<void> {
 
     status('chatgpt', 'model: ChatGPT (browser)');
     status('chatgpt', `prompt: ${prompt.length} chars`);
+    const { chatGPT } = require('./chatgpt');
     const response = await chatGPT(prompt, { debug: args.debug, sync: args.sync });
     status('chatgpt', `done (${response.length} chars received)`);
     if (args.outputFilePath) {
@@ -558,8 +561,9 @@ async function main(): Promise<void> {
     ensureLocalModel(args.model, args.debug);
   }
 
+  const { CopilotClient } = require('./client') as { CopilotClient: typeof CopilotClientType };
   let token: string | undefined;
-  let client: CopilotClient;
+  let client: InstanceType<typeof CopilotClient>;
   if (isLocal) {
     client = new CopilotClient({
       local: true,
@@ -617,6 +621,7 @@ async function main(): Promise<void> {
       process.stderr.write('--usage is not available for local models\n');
       return;
     }
+    const axios = require('axios').default;
     const res = await axios.get('https://api.github.com/copilot_internal/user', {
       headers: {
         'Authorization': `token ${token}`,
