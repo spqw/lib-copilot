@@ -1,6 +1,6 @@
 {
   "name": "@spqw/vcopilot",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "description": "Direct Copilot API client - mimic VSCode extension behavior for CLI/programmatic access",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
