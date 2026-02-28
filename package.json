@@ -22,13 +22,28 @@
     "example:chat": "ts-node examples/chat-example.ts",
     "example:completion": "ts-node examples/completion-example.ts"
   },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/spqw/lib-copilot"
+  },
+  "homepage": "https://github.com/spqw/lib-copilot#readme",
+  "bugs": {
+    "url": "https://github.com/spqw/lib-copilot/issues"
+  },
+  "engines": {
+    "node": ">=16"
+  },
   "keywords": [
     "copilot",
     "github-copilot",
     "api",
-    "vscode-extension",
+    "cli",
     "code-generation",
-    "ai"
+    "ai",
+    "gpt-4",
+    "claude",
+    "gemini"
   ],
   "dependencies": {
     "axios": "^1.6.0",
