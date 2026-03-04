@@ -94,14 +94,14 @@ import { CopilotAuth } from 'lib-copilot';
 
 const auth = new CopilotAuth();
 const token = await auth.getToken();
-// Checks: env vars → ~/.copilot/token.json → VSCode session
+// Checks: VSCode session → env vars → ~/.copilot/token.json
 ```
 
 **Priority:**
-1. `GITHUB_TOKEN` environment variable
-2. `COPILOT_TOKEN` environment variable
-3. Cached token (`~/.copilot/token.json`)
-4. VSCode extension token (if available)
+1. VSCode extension token (if available)
+2. `GITHUB_TOKEN` environment variable
+3. `COPILOT_TOKEN` environment variable
+4. Cached token (`~/.copilot/token.json`)
 
 ### 3. Device Flow (Browser Auth)
 
@@ -402,7 +402,7 @@ await documentCode('src/utils.ts');
 interface CopilotOptions {
   token?: string;           // Auth token
   endpoint?: string;        // API endpoint (default: GitHub API)
-  model?: string;           // Model to use (default: gpt-4)
+  model?: string;           // Model to use (default: gpt-4.1)
   timeout?: number;         // Request timeout in ms
   debug?: boolean;          // Enable debug logging
 }

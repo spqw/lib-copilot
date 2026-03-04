@@ -22,7 +22,7 @@ async function main() {
   // Create client
   const copilot = new CopilotClient({
     token,
-    model: 'gpt-4',
+    model: 'gpt-4.1',
     debug: true,
   });
 

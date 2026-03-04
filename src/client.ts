@@ -43,7 +43,7 @@ export class CopilotClient {
   constructor(options: CopilotOptions = {}) {
     this.local = options.local || false;
     this.endpoint = options.endpoint || (this.local ? 'http://localhost:1234/v1' : 'https://api.githubcopilot.com');
-    this.model = options.model || (this.local ? 'default' : 'gpt-4');
+    this.model = options.model || (this.local ? 'default' : 'gpt-4.1');
     this.debug = options.debug || false;
     this.githubToken = options.token || null;
     this.auth = options.auth || null;

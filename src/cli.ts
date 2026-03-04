@@ -77,8 +77,8 @@ function parseArgs(argv: string[]): {
     usage: false,
     local: false,
     vscode: false,
-    chatgpt: true,
-    copilot: false,
+    chatgpt: false,
+    copilot: true,
     version: false,
     update: false,
     sync: false,
@@ -170,18 +170,19 @@ Server mode:
 
 Authentication:
   --login             Authenticate via browser-based device flow
-  --vscode            Use VSCode Copilot extension's cached token
+  --vscode            Require VSCode Copilot extension cached token
   --status            Show github token, vscode session, and copilot session
 
   Token priority:
-    1. --vscode                   VSCode extension session
-    2. GITHUB_TOKEN env var       Environment variable
-    3. ~/.copilot/token.json      Cached from previous --login
-    4. Device flow (automatic)    Browser-based OAuth fallback
+    1. --vscode                   Require VSCode extension session
+    2. VSCode extension session   Default when available
+    3. GITHUB_TOKEN env var       Environment variable
+    4. ~/.copilot/token.json      Cached from previous --login
+    5. Device flow (automatic)    Browser-based OAuth fallback
 
-Processor (default: ChatGPT):
-  --chatgpt           Use ChatGPT via browser automation (default)
-  --copilot           Use GitHub Copilot API instead of ChatGPT
+Processor (default: Copilot / VSCode-style):
+  --chatgpt           Use ChatGPT via browser automation
+  --copilot           Use GitHub Copilot API (default)
 
 Local models (LM Studio / OpenAI-compatible):
   --local             Use local LM Studio server (localhost:1234)
@@ -264,7 +265,14 @@ async function authenticate(auth: CopilotAuthType, debug: boolean, forceVSCode: 
     );
   }
 
-  // 2. Try env vars
+  // 2. Prefer VSCode session by default when available
+  const vscode = await auth.authenticateWithVSCode();
+  if (vscode) {
+    if (debug) process.stderr.write('[auth] using VSCode session token\n');
+    return vscode.token;
+  }
+
+  // 3. Try env vars
   const envToken = process.env.GITHUB_TOKEN || process.env.COPILOT_TOKEN;
   if (envToken) {
     const envName = process.env.GITHUB_TOKEN ? 'GITHUB_TOKEN' : 'COPILOT_TOKEN';
@@ -272,14 +280,14 @@ async function authenticate(auth: CopilotAuthType, debug: boolean, forceVSCode: 
     return envToken;
   }
 
-  // 3. Try cached token
+  // 4. Try cached token
   const cached = auth['getCachedToken']();
   if (cached) {
     status('auth', 'using cached token (~/.copilot/token.json)');
     return cached;
   }
 
-  // 4. Auto device flow (last resort)
+  // 5. Auto device flow (last resort)
   status('auth', 'no token found, starting device flow authentication...');
   const flow = await auth.initiateDeviceFlow();
   process.stderr.write(`\nOpen: ${flow.verification_uri}\nEnter code: ${flow.user_code}\n\nWaiting for authorization...\n`);
@@ -509,7 +517,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  // chatgpt: browser automation mode (default unless --copilot, --local, or --endpoint)
+  // --chatgpt: browser automation mode (opt-in)
   if (args.chatgpt && !args.copilot && !args.local && !args.endpoint && !args.usage && !args.models) {
     // Determine prompt: positional args prepended to stdin if both present
     let prompt: string;

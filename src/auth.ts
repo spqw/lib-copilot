@@ -50,14 +50,21 @@ export class CopilotAuth {
    * Get token from environment or cache
    */
   public async getToken(): Promise<string | null> {
-    // 1. Check environment variables
+    // 1. Prefer VSCode extension token when available
+    const vscodeToken = await this.authenticateWithVSCode();
+    if (vscodeToken) {
+      if (this.debug) console.log('[Auth] Token from VSCode session');
+      return vscodeToken.token;
+    }
+
+    // 2. Check environment variables
     const envToken = process.env.GITHUB_TOKEN || process.env.COPILOT_TOKEN;
     if (envToken) {
       if (this.debug) console.log('[Auth] Token from environment');
       return envToken;
     }
 
-    // 2. Check cached token
+    // 3. Check cached token
     const cachedToken = this.getCachedToken();
     if (cachedToken) {
       if (this.debug) console.log('[Auth] Token from cache');
